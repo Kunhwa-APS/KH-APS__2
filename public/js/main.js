@@ -9,8 +9,9 @@ import { runDiff, visualizeDiff, loadVersions, exitCompareMode, showDiffList, ad
 // import { initLocalClash, closeClashPanel } from './clash-viewer.js';
 import { IssueManager } from './issue-manager.js';
 import { addCustomButtons } from './toolbar-utils.js';
+import { initMap, addProjectMarkers, flyToLocation, resizeMap } from './map.js';
 import { loadVersionsDropdown } from './version-manager.js?v=ver_20260330_1715';
-
+import { renderPremiumDashboard } from './dashboard-premium.js';
 import { explorer } from './explorer.js';
 
 const login = document.getElementById('login');
@@ -25,7 +26,8 @@ let versionA = null;
 let versionB = null;
 let _exitCompareToolbarBtn = null; // Reference to the toolbar exit button
 let issueManager = null;
-
+let mapInitialized = false;
+let mapApiKey = null;
 
 // Expose handles globally for toolbar-utils.js
 window._issueManager = null;
@@ -112,7 +114,11 @@ try {
         // 3. Init Tree
         initTree('#tree', (node) => handleTreeSelection(node));
 
-        // 4. Logo Click Event
+        // 4. Project Dashboard Init
+        renderPremiumDashboard(); // New premium dashboard
+        renderProjectSelectionDashboard(); // Legacy one (hidden)
+
+        // 5. Logo Click Event
         const logo = document.querySelector('.logo');
         if (logo) {
             logo.style.cursor = 'pointer';
@@ -145,12 +151,100 @@ try {
     }
     login.style.visibility = 'visible';
 
+    // 7. Load Map Config
+    try {
+        const cfgResp = await fetch('/api/config/maps');
+        if (cfgResp.ok) {
+            const cfg = await cfgResp.json();
+            mapApiKey = cfg.apiKey;
+        } else {
+            console.warn('Map configuration fetch failed.');
+        }
+    } catch (err) {
+        console.warn('Could not load maps config:', err.message);
+    }
 
+    // 8. Bind Tab Events
+    setupTabs();
 
 } catch (err) {
     console.error('Initialization error:', err);
     login.style.visibility = 'visible';
 }
+
+async function renderProjectSelectionDashboard() {
+    const dashboard = document.getElementById('project-selection-dashboard');
+    const projectListBody = document.getElementById('project-list-body');
+    if (!dashboard || !projectListBody) return;
+
+    // 0. Update Date
+    const dateEl = document.getElementById('dashboard-current-date');
+    if (dateEl) {
+        const now = new Date();
+        const days = ['SUNDAY', 'MONDAY', 'TUESDAY', 'WEDNESDAY', 'THURSDAY', 'FRIDAY', 'SATURDAY'];
+        const yyyy = now.getFullYear();
+        const mm = String(now.getMonth() + 1).padStart(2, '0');
+        const dd = String(now.getDate()).padStart(2, '0');
+        dateEl.textContent = `${yyyy}-${mm}-${dd} ${days[now.getDay()]}`;
+    }
+
+    try {
+        // 1. Fetch Hubs
+        const hubsResponse = await fetch('/api/hubs');
+        const hubs = await hubsResponse.json();
+
+        if (!Array.isArray(hubs) || hubs.length === 0) {
+            const errorMsg = hubs.error || '허브 정보를 찾을 수 없습니다. 로그인을 확인해주세요.';
+            projectListBody.innerHTML = `<tr><td colspan="6" class="error-state">${errorMsg}</td></tr>`;
+            return;
+        }
+
+        // 2. Fetch Projects for all Hubs in parallel
+        projectListBody.innerHTML = '<tr><td colspan="6" class="loading-state">참여 중인 프로젝트를 검색하고 있습니다...</td></tr>';
+
+        let allProjects = [];
+        const projectPromises = hubs.map(async (hub) => {
+            try {
+                const projectsResponse = await fetch(`/api/hubs/${hub.id}/projects`);
+                const projects = await projectsResponse.json();
+                return projects.map(p => ({ ...p, hubName: hub.name, hubId: hub.id }));
+            } catch (err) {
+                console.warn(`Failed to fetch projects for hub ${hub.id}:`, err);
+                return [];
+            }
+        });
+
+        const results = await Promise.all(projectPromises);
+        allProjects = results.flat();
+
+        if (allProjects.length === 0) {
+            projectListBody.innerHTML = '<tr><td colspan="6" class="error-state">참여 중인 프로젝트가 없습니다.</td></tr>';
+            return;
+        }
+
+        // 3. Sort by creation date (descending)
+        allProjects.sort((a, b) => new Date(b.created || 0) - new Date(a.created || 0));
+
+        // 4. Render Table
+        renderProjectRows(allProjects);
+
+        // 5. Search filtering
+        const searchInput = document.getElementById('project-search');
+        searchInput.oninput = (e) => {
+            const term = e.target.value.toLowerCase();
+            const filtered = allProjects.filter(p =>
+                p.name.toLowerCase().includes(term) ||
+                (p.hubName && p.hubName.toLowerCase().includes(term))
+            );
+            renderProjectRows(filtered);
+        };
+
+    } catch (err) {
+        console.error('[Dashboard] Error rendering:', err);
+        projectListBody.innerHTML = '<tr><td colspan="6" class="error-state">프로젝트 목록을 가져오는 중 오류가 발생했습니다.</td></tr>';
+    }
+}
+
 
 
 
