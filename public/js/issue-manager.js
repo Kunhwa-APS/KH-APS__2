@@ -1,6 +1,6 @@
 /**
  * public/js/issue-manager.js
- * Manages custom 3D issues, markers, and local storage persistence.
+ * Manages custom 3D issues, markers, and local storage persistence with PDF Item Selection.
  */
 import { unreadManager } from './unread-manager.js';
 
@@ -24,18 +24,15 @@ class IDBStorage {
 
     init() {
         return new Promise((resolve, reject) => {
-            console.log('[IDBStorage] Initializing IndexedDB...');
             const request = indexedDB.open(this.dbName, 1);
             request.onupgradeneeded = (e) => {
                 const db = e.target.result;
                 if (!db.objectStoreNames.contains(this.storeName)) {
                     db.createObjectStore(this.storeName);
-                    console.log('[IDBStorage] Store created:', this.storeName);
                 }
             };
             request.onsuccess = (e) => {
                 this.db = e.target.result;
-                console.log('[IDBStorage] Connection opened.');
                 resolve();
             };
             request.onerror = (e) => reject(e.target.error);
@@ -69,89 +66,126 @@ export class IssueManager {
     constructor(viewer) {
         this.viewer = viewer;
         this.storage = new IDBStorage();
-        this.issues = []; // Populated via init()
+        this.issues = [];
         this.isCreationMode = false;
-        this.exportPayload = null; // [New] Store the issues for PDF export directly to avoid dataset limits
+        this.exportPayload = null;
         this._onIssueClick = this._onIssueClick.bind(this);
-        this._onCameraChange = this._onCameraChange.bind(this); // [New] Camera Sync
-        this.tempIssueMarker = null; // [New] HTML Marker Element
-        this.tempIssuePosition = null; // [New] 3D World Position
+        this._onCameraChange = this._onCameraChange.bind(this);
+        this.tempIssueMarker = null;
+        this.tempIssuePosition = null;
         this.htmlMarkersMap = new Map();
-        // [Multi-Criteria Filter] Null = show all; set via this.setMarkerFilter()
         this.activeStructureFilter = null;
         this.activeWorkTypeFilter = null;
+        this.markersVisible = true;
         this.initOverlays();
 
-        // [Nuclear Reconstruction] Infinite Update Loop at Browser Level
+        // [Fix] 마크업 관련 전역 이벤트 위임 바인딩
+        this._bindGlobalMarkupEvents();
+
         this._syncLoop = this._syncLoop.bind(this);
         requestAnimationFrame(this._syncLoop);
     }
 
-    /**
-     * Async initialization: Setup DB, Migrate, Load Issues
-     */
-    async init() {
-        console.log('[IssueManager] Async initialization started...');
-        try {
-            await this.storage.init();
+    _bindGlobalMarkupEvents() {
+        // [Fix] Event Delegation을 통한 양방향 동기화 및 스타일 적용
+        document.body.addEventListener('input', (e) => {
+            if (!this.markupsExt) return; // 마크업 활성화 상태 확인
 
-            // 1. Check for migration from localStorage
-            const legacyData = localStorage.getItem('aps-viewer-issues');
-            if (legacyData) {
-                console.log('[IssueManager] Legacy data found. Migrating to IndexedDB...');
-                const legacyIssues = JSON.parse(legacyData);
-                await this.storage.set('issues', legacyIssues);
-                localStorage.removeItem('aps-viewer-issues'); // Clear after migration
-                console.log('[IssueManager] Migration complete.');
+            if (e.target.id === 'markup-width-slider' || e.target.id === 'markup-width-input') {
+                const val = parseFloat(e.target.value);
+                if (isNaN(val)) return;
+                
+                // 양방향 UI 동기화
+                if (e.target.id === 'markup-width-slider') {
+                    const numInput = document.getElementById('markup-width-input');
+                    if (numInput) numInput.value = val.toFixed(1);
+                } else {
+                    const slider = document.getElementById('markup-width-slider');
+                    if (slider) slider.value = val;
+                }
+                
+                // API 적용 (반드시 Number 타입, 호환성을 위해 속성 이름 이중화)
+                this.markupsExt.setStyle({ 
+                    strokeWidth: val,
+                    'stroke-width': val
+                });
             }
 
-            // 2. Load issues
-            const saved = await this.storage.get('issues');
-            this.issues = saved || [];
-            console.log(`[IssueManager] ${this.issues.length} issues loaded from IndexedDB.`);
+            if (e.target.id === 'markup-color-picker') {
+                const hexColor = e.target.value;
+                this.markupsExt.setStyle({ 
+                    strokeColor: hexColor,
+                    'stroke-color': hexColor
+                });
+            }
+        });
 
-            // 3. Render initial state
+        // [Fix] 전역 키보드 훅 (Del 키 마크업 삭제 - Capture 모드 적용)
+        document.addEventListener('keydown', (e) => {
+            // 사용자가 input 태그에 타이핑 중일 때는 삭제 방지
+            if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+
+            if ((e.key === 'Delete' || e.key === 'Backspace') && this.markupsExt) {
+                const selection = this.markupsExt.getSelection();
+                // 단일 객체이므로 length 검사를 제거하고 존재 여부만 확인
+                if (selection) {
+                    this.markupsExt.deleteMarkup(selection);
+                    console.log('[Markup-Log] 선택된 마크업 삭제 완료');
+                }
+            }
+        }, { capture: true }); // 이벤트 버블링을 삼키는 뷰어를 우회하기 위해 캡처링 단계에서 캐치
+    }
+
+    async init() {
+        try {
+            await this.storage.init();
+            const legacyData = localStorage.getItem('aps-viewer-issues');
+            if (legacyData) {
+                const legacyIssues = JSON.parse(legacyData);
+                await this.storage.set('issues', legacyIssues);
+                localStorage.removeItem('aps-viewer-issues');
+            }
+            const saved = await this.storage.get('issues');
+            this.issues = (saved || []).filter(i => !i.isComparison);
             this.renderIssueList();
             this.restorePins();
-            this._updateBulkBtnLabel();
 
-            // [Nuclear Reconstruction] Persistent Multi-event listeners
             const syncEvents = [
                 Autodesk.Viewing.CAMERA_CHANGE_EVENT,
                 Autodesk.Viewing.VIEWER_STATE_RESTORED_EVENT,
                 Autodesk.Viewing.TRANSITION_COMPLETED_EVENT,
                 Autodesk.Viewing.FOCAL_LENGTH_CHANGED_EVENT,
-                Autodesk.Viewing.MODEL_ROOT_LOADED_EVENT
+                Autodesk.Viewing.MODEL_ROOT_LOADED_EVENT,
+                Autodesk.Viewing.GEOMETRY_LOADED_EVENT
             ];
-
             syncEvents.forEach(evt => {
                 this.viewer.removeEventListener(evt, this._onCameraChange);
                 this.viewer.addEventListener(evt, this._onCameraChange);
             });
 
-            // [Filtering Logic] Trigger pin restoration on model load
             this.viewer.addEventListener(Autodesk.Viewing.GEOMETRY_LOADED_EVENT, () => {
-                console.log('[Filtering Logic] Model loaded, restoring pins for current GUID');
-                this.restorePins();
+                try {
+                    this.restorePins();
+                } catch (e) {
+                    console.error('[IssueManager] GEOMETRY_LOADED_EVENT 핸들러 오류 (다른 이벤트에 영향 없음):', e);
+                }
             });
 
-            console.log('[Nuclear Reconstruction] Hardware-level event binding complete');
+            // [Fix] #bulk-pdf-btn 전체/선택 내보내기 버튼 이벤트 바인딩 복구
+            const bulkBtn = document.getElementById('bulk-pdf-btn');
+            if (bulkBtn) bulkBtn.onclick = () => this.openPdfExportModal();
 
-            // [Toggle Button] Inject marker visibility toggle into viewer container
+            // Sync with Server on Init
+            await this.syncWithServer();
+
             this._injectMarkerToggle();
         } catch (err) {
-            console.error('[IssueManager] Initialization failed:', err);
-            // Fallback to empty list
-            this.issues = [];
+            console.error('[IssueManager] Init failed:', err);
         }
     }
 
-    /**
-     * [Toggle] Injects a floating toggle button into the viewer container.
-     */
     _injectMarkerToggle() {
         if (document.getElementById('issue-marker-toggle-wrap')) return;
-
         const container = this.viewer.container;
         const wrap = document.createElement('div');
         wrap.id = 'issue-marker-toggle-wrap';
@@ -167,16 +201,11 @@ export class IssueManager {
         `;
         container.style.position = 'relative';
         container.appendChild(wrap);
-
         document.getElementById('issue-marker-toggle-cb').addEventListener('change', (e) => {
             this.toggleMarkerVisibility(e.target.checked);
         });
     }
 
-    /**
-     * [Toggle] Show or hide all HTML issue markers.
-     * @param {boolean} visible - true: show, false: hide
-     */
     toggleMarkerVisibility(visible) {
         this.markersVisible = visible;
         this.htmlMarkersMap.forEach((data) => {
@@ -184,11 +213,9 @@ export class IssueManager {
                 data.element.style.visibility = visible ? 'visible' : 'hidden';
             }
         });
-        // Also hide/show temp marker if present
         if (this.tempIssueMarker) {
             this.tempIssueMarker.style.visibility = visible ? 'visible' : 'hidden';
         }
-        console.log(`[Toggle] Issue markers ${visible ? 'shown' : 'hidden'}`);
     }
 
     initOverlays() {
@@ -197,108 +224,104 @@ export class IssueManager {
         }
     }
 
-    async saveIssues() {
-        console.log('[IssueManager] Saving issues to IndexedDB...', this.issues);
+    async saveIssues(issue = null) {
         try {
             await this.storage.set('issues', this.issues);
-            console.log('[IssueManager] Save successful.');
-        } catch (e) {
-            console.error('[IssueManager] Error saving to IndexedDB:', e);
-            alert('저장에 실패했습니다. 저장 공간 부족 여부를 확인해 주세요.');
-        }
 
-        this.renderIssueList();
-        this._updateBulkBtnLabel();
+            if (issue) {
+                const response = await fetch('/api/issues', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(issue)
+                });
+                if (!response.ok) {
+                    console.error('[IssueManager] 이슈 서버 동기화 실패:', response.status, response.statusText);
+                }
+            }
+        } catch (e) {
+            console.error('[IssueManager] Save failed:', e);
+        } finally {
+            // 서버 저장이나 로컬 저장 중 에러가 발생해도 렌더링이 멈추지 않도록 보호
+            try {
+                this.renderIssueList();
+            } catch (renderError) {
+                console.error('[IssueManager] renderIssueList 에러 발생 (렌더링 보호):', renderError);
+            }
+        }
     }
 
+    async syncWithServer() {
+        try {
+            const resp = await fetch('/api/issues');
+            if (resp.ok) {
+                const serverIssues = await resp.json();
+                // Merge or replace local issues
+                this.issues = serverIssues.filter(i => !i.isComparison);
+                await this.storage.set('issues', this.issues);
+                this.renderIssueList();
+                this.restorePins();
+                console.log('[IssueManager] Synced with server:', this.issues.length);
+            }
+        } catch (err) {
+            console.warn('[IssueManager] Server sync failed (offline?):', err);
+        }
+    }
 
     toggleCreationMode(on) {
         this.isCreationMode = (on !== undefined) ? on : !this.isCreationMode;
-        console.log(`[IssueManager] Creation Mode: ${this.isCreationMode}`);
-
-        // [Emergency Fix] Use viewer.canvas for listener as requested by User
         const targetElement = this.viewer.canvas;
-
-        // Clean up both container and canvas listeners to prevent any conflict
-        this.viewer.container.removeEventListener('click', this._onIssueClick);
         targetElement.removeEventListener('click', this._onIssueClick);
-
         if (this.isCreationMode) {
-            targetElement.style.cursor = 'crosshair';
+            targetElement.style.setProperty('cursor', 'crosshair', 'important');
+            this.viewer.container.style.setProperty('cursor', 'crosshair', 'important');
             targetElement.addEventListener('click', this._onIssueClick);
-            console.log('[Restore] Click listener re-registered on viewer.canvas');
         } else {
             targetElement.style.cursor = '';
-            targetElement.removeEventListener('click', this._onIssueClick);
-            console.log('[Restore] Click listener removed from viewer.canvas');
+            this.viewer.container.style.cursor = '';
         }
-
-        // Update toolbar button state if it exists
         const btn = document.getElementById('add-issue-tool-btn');
-        if (btn) {
-            if (this.isCreationMode) {
-                btn.classList.add('active');
-                btn.classList.add('pulsing');
-            } else {
-                btn.classList.remove('active');
-                btn.classList.remove('pulsing');
-            }
-        }
+        if (btn) btn.classList.toggle('active', this.isCreationMode);
     }
 
     _onIssueClick(e) {
-        console.log('[Emergency] Click detected -> capturing world coordinates');
+        const rect = this.viewer.container.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
 
-        try {
-            const rect = this.viewer.container.getBoundingClientRect();
-            const x = e.clientX - rect.left;
-            const y = e.clientY - rect.top;
+        const result = this.viewer.impl.hitTest(x, y, true);
 
-            const result = this.viewer.impl.hitTest(x, y, true);
+        if (result && result.dbId) {
+            const dbId = result.dbId;
+            this.removeTempMarker();
+            this.tempIssuePosition = result.intersectPoint.clone();
 
-            if (result && result.dbId) {
-                console.log(`[Emergency] Hit Success! dbId: ${result.dbId}, Point:`, result.intersectPoint);
+            const marker = document.createElement('div');
+            marker.id = 'temp-issue-marker-div';
+            marker.className = 'issue-temp-marker';
+            this.viewer.container.appendChild(marker);
+            this.tempIssueMarker = marker;
 
-                // [Emergency] Get Model GUID (getGuid() requested)
-                const modelGuid = (this.viewer.model && this.viewer.model.getGuid) ? this.viewer.model.getGuid() :
-                    (result.model && result.model.getModelGuid ? result.model.getModelGuid() : 'N/A');
-                const dbId = result.dbId;
+            this.syncAllMarkers();
+            this.toggleCreationMode(false);
 
-                // [Step 1] Create HTML Marker
-                this.removeTempMarker();
-                this.tempIssuePosition = result.intersectPoint.clone();
+            // Enter Markup Mode
+            this.enterMarkupMode(dbId, result.intersectPoint);
 
-                const marker = document.createElement('div');
-                marker.id = 'temp-issue-marker-div';
-                marker.className = 'issue-temp-marker';
-                marker.dataset.dbId = dbId;
-                marker.dataset.modelGuid = modelGuid;
-
-                if (window.currentIssueStatus === 'Closed') {
-                    marker.classList.add('green');
+            // [Fix] 캡처 완료 시 모달 표시 여부와 무관하게 dataset에 저장
+            this.captureIssueThumbnail((base64) => {
+                const modal = document.getElementById('issue-modal');
+                if (modal && base64) {
+                    modal.dataset.thumbnail = base64;
+                    console.log('[IssueManager] thumbnail 저장 완료, 길이:', base64.length);
+                    const preview = document.getElementById('issue-preview-img');
+                    if (preview && modal.style.display === 'flex') {
+                        preview.src = base64;
+                        const previewWrap = document.getElementById('modal-image-preview');
+                        if (previewWrap) previewWrap.style.display = 'flex';
+                    }
                 }
-
-                this.viewer.container.appendChild(marker);
-                this.tempIssueMarker = marker;
-
-                // Sync immediately
-                this._onCameraChange();
-
-                // STOP listening for clicks but keep marker
-                this.toggleCreationMode(false);
-
-                // [Markup Flow] Enter Markup Mode
-                this.enterMarkupMode(dbId, result.intersectPoint);
-
-                this.captureIssueThumbnail((base64) => {
-                    this.tempThumbnail = base64;
-                });
-            } else {
-                console.log('[Emergency] Hit Failed: No object found at clicked location.');
-                this.toggleCreationMode(false);
-            }
-        } catch (err) {
-            console.error('[Emergency] Critical error during coordinate capture:', err);
+            });
+        } else {
             this.toggleCreationMode(false);
         }
     }
@@ -307,116 +330,115 @@ export class IssueManager {
         this.syncAllMarkers();
     }
 
-    /**
-     * [Nuclear Reconstruction] Infinite loop to ensure markers are always synced.
-     */
     _syncLoop() {
         this.syncAllMarkers();
         requestAnimationFrame(this._syncLoop);
     }
 
-    /**
-     * [Nuclear Reconstruction] Central Engine for all marker-to-3D projection sync.
-     * Uses worldPosition as the single Source of Truth.
-     */
     syncAllMarkers() {
-        // 1. Sync Temporary Marker
         if (this.tempIssueMarker && this.tempIssuePosition) {
             const screenPos = this.viewer.worldToClient(this.tempIssuePosition);
             this.tempIssueMarker.style.left = `${Math.round(screenPos.x)}px`;
             this.tempIssueMarker.style.top = `${Math.round(screenPos.y)}px`;
 
-            const camera = this.viewer.navigation.getCamera();
-            const dir = new THREE.Vector3().subVectors(this.tempIssuePosition, camera.position).normalize();
-            const cameraDir = camera.getWorldDirection(new THREE.Vector3());
-            const dot = dir.dot(cameraDir);
-            this.tempIssueMarker.style.display = dot > 0 ? 'block' : 'none';
+            // 화면 밖으로 나갔는지 2D 좌표로만 단순 확인 (너무 엄격한 Z축 깊이 검사 제거)
+            if (screenPos.x >= 0 && screenPos.y >= 0 && 
+                screenPos.x <= this.viewer.container.clientWidth && 
+                screenPos.y <= this.viewer.container.clientHeight) {
+                this.tempIssueMarker.style.display = 'block';
+                this.tempIssueMarker.style.visibility = 'visible';
+            } else {
+                this.tempIssueMarker.style.visibility = 'hidden';
+            }
         }
 
-        // 2. Sync all persistent HTML markers
         this.htmlMarkersMap.forEach((data) => {
             const worldPos = data.position;
             const screenPoint = this.viewer.worldToClient(new THREE.Vector3(worldPos.x, worldPos.y, worldPos.z));
 
-            // [Nuclear Safeguard] Invalid projection detection
             if (!screenPoint || (screenPoint.x === 0 && screenPoint.y === 0)) {
                 data.element.style.display = 'none';
                 return;
             }
 
-            // Forced position update (Rounded for sub-pixel stability)
             data.element.style.left = `${Math.round(screenPoint.x)}px`;
             data.element.style.top = `${Math.round(screenPoint.y)}px`;
 
-            const camera = this.viewer.navigation.getCamera();
-            const dir = new THREE.Vector3().subVectors(worldPos, camera.position).normalize();
-            const cameraDir = camera.getWorldDirection(new THREE.Vector3());
-            const dot = dir.dot(cameraDir);
-
-            // Visibility & Interaction anchoring
-            data.element.style.display = (dot > 0.05) ? 'block' : 'none';
-            data.element.style.zIndex = 2000;
+            // 화면 밖으로 나갔는지 2D 좌표로만 단순 확인 (너무 엄격한 Z축 깊이 검사 제거)
+            if (screenPoint.x >= 0 && screenPoint.y >= 0 && 
+                screenPoint.x <= this.viewer.container.clientWidth && 
+                screenPoint.y <= this.viewer.container.clientHeight) {
+                data.element.style.display = 'block';
+                data.element.style.visibility = 'visible';
+            } else {
+                data.element.style.visibility = 'hidden';
+            }
         });
-    }
-
-    // Facade for backward compatibility
-    refreshAllMarkers() {
-        this.syncAllMarkers();
-    }
-
-    /**
-     * Updates the position of the temporary creation marker.
-     * @param {THREE.Vector3} [worldPoint] - Optional override for position.
-     */
-    updateTempMarkerPosition(worldPoint) {
-        if (!this.tempIssueMarker) return;
-
-        const pos = worldPoint || this.tempIssuePosition;
-        if (!pos) return;
-
-        const screenPos = this.viewer.worldToClient(pos);
-        this.tempIssueMarker.style.left = `${screenPos.x}px`;
-        this.tempIssueMarker.style.top = `${screenPos.y}px`;
     }
 
     removeTempMarker() {
         if (this.tempIssueMarker) {
             this.tempIssueMarker.remove();
             this.tempIssueMarker = null;
-            this.viewer.removeEventListener(Autodesk.Viewing.CAMERA_CHANGE_EVENT, this._onCameraChange);
         }
         this.tempIssuePosition = null;
     }
 
     captureIssueThumbnail(callback, markupExt = null) {
-        console.log('[IssueManager] Capturing background screenshot...');
         try {
-            if (typeof this.viewer.setQualityLevel === 'function') {
-                this.viewer.setQualityLevel(true, true);
-            }
+            this.viewer.impl.invalidate(true, true, true);
+        } catch (e) {
+            console.warn('[IssueManager] 뷰어 갱신 중 예외:', e);
+        }
 
-            // [Hard Compositing] 1. Get Base Screenshot
+        requestAnimationFrame(() => {
             const width = this.viewer.container.clientWidth;
             const height = this.viewer.container.clientHeight;
-            console.log(`[IssueManager] Dynamic capture at ${width}x${height}`);
-            this.viewer.getScreenShot(width, height, (blobUrl) => {
-                if (!blobUrl) {
-                    console.error('[IssueManager] Screenshot failed.');
-                    callback(null);
-                    return;
+            this.viewer.getScreenShot(width, height, async (blobData) => {
+                if (!blobData) {
+                    console.error('[IssueManager] 썸네일 캡처 실패: 반환값 없음');
+                    return callback(null);
                 }
-                this._performHardCanvasCompositing(blobUrl, width, height, markupExt, callback);
+
+                try {
+                    let base64data = blobData;
+
+                    // 1. blob URL 문자열인 경우 원본 Blob 객체를 fetch로 확보
+                    if (typeof blobData === 'string' && blobData.startsWith('blob:')) {
+                        const res = await fetch(blobData);
+                        const rawBlob = await res.blob();
+                        base64data = await new Promise(resolve => {
+                            const reader = new FileReader();
+                            reader.onloadend = () => resolve(reader.result);
+                            reader.readAsDataURL(rawBlob);
+                        });
+                    }
+                    // 2. 이미 순수 Blob 객체인 경우
+                    else if (blobData instanceof Blob) {
+                        base64data = await new Promise(resolve => {
+                            const reader = new FileReader();
+                            reader.onloadend = () => resolve(reader.result);
+                            reader.readAsDataURL(blobData);
+                        });
+                    }
+
+                    if (!base64data) return callback(null);
+
+                    // 확보된 안정적 Base64로 마크업 병합 엔진 호출
+                    this._performHardCanvasCompositing(base64data, width, height, markupExt, callback);
+                } catch (error) {
+                    console.error('[IssueManager] Base64 변환 실패:', error);
+                    callback(null);
+                }
             });
-        } catch (err) {
-            console.error('[IssueManager] Capture error:', err);
-            callback(null);
-        }
+        });
     }
 
-    async _performHardCanvasCompositing(blobUrl, w, h, markupExt, callback) {
-        try {
-            const img = new Image();
-            img.onload = async () => {
+    async _performHardCanvasCompositing(base64data, w, h, markupExt, callback) {
+        const img = new Image();
+
+        img.onload = async () => {
+            try {
                 const canvas = document.createElement('canvas');
                 canvas.width = w; canvas.height = h;
                 const ctx = canvas.getContext('2d');
@@ -425,1135 +447,787 @@ export class IssueManager {
                 ctx.drawImage(img, 0, 0, w, h);
 
                 if (markupExt) {
-                    console.log('[IssueManager] Performing Hard Canvas Compositing...');
                     await new Promise(resolve => markupExt.renderToCanvas(ctx, resolve));
                 }
-
                 const finalB64 = canvas.toDataURL('image/jpeg', 0.85);
-                URL.revokeObjectURL(img.src);
-                console.log('[IssueManager] Hard compositing success.');
                 callback(finalB64);
-            };
-            img.src = blobUrl;
-        } catch (e) {
-            console.error('[IssueManager] Compositing failed:', e);
-            callback(null);
-        }
+            } catch (err) {
+                console.error('[IssueManager] 캔버스 컴포지팅 중 보안 에러(Tainted):', err);
+                // 에러 발생 시 원본 base64data(마크업 없음)라도 반환
+                callback(base64data);
+            }
+        };
+
+        img.onerror = () => {
+            console.warn('[IssueManager] 썸네일 컴포지트 img 로드 실패 방어 코드 발동');
+            // 로드 실패 시에도 최하위 원본은 살려서 반환
+            callback(base64data);
+        };
+
+        // 절대적으로 안전한 Base64 데이터를 src로 할당
+        img.src = base64data;
     }
 
     showCreateModal(dbId, point, thumbnail) {
         const modal = document.getElementById('issue-modal');
         if (!modal) return;
 
-        // Capture visual context instantly
-        const viewstate = this.viewer.getState();
-        const model = this.viewer.model;
-        const targetModelUrn = model ? model.getData().urn : null;
+        // 동적 Assignee 드롭다운 바인딩
+        this.populateAssigneeDropdown();
 
-        // Store temp data in modal dataset
+        // [Fix] 신규 모달 열기 전 폼 초기화 (Stale State 버그 방지)
+        const titleInput = document.getElementById('issue-title');
+        if (titleInput) titleInput.value = '';
+        const descInput = document.getElementById('issue-desc');
+        if (descInput) descInput.value = '';
+        const statusSelect = document.getElementById('issue-status');
+        if (statusSelect) statusSelect.value = 'Open';
+        const assigneeInput = document.getElementById('issue-assignee');
+        if (assigneeInput) assigneeInput.value = '';
+        const resDescInput = document.getElementById('issue-resolution-desc');
+        if (resDescInput) resDescInput.value = '';
+
+        const resSection = document.getElementById('issue-resolution-section');
+        if (resSection) resSection.style.display = 'none';
+        const afterPreviewWrap = document.getElementById('modal-after-image-preview');
+        if (afterPreviewWrap) afterPreviewWrap.style.display = 'none';
+
+        delete modal.dataset.afterThumbnail;
+        delete modal.dataset.afterViewstate;
+        delete modal.dataset.editId;
+
+        modal.dataset.mode = 'create';
         modal.dataset.dbId = dbId;
         modal.dataset.point = JSON.stringify(point);
-        modal.dataset.thumbnail = thumbnail;
-        modal.dataset.viewstate = JSON.stringify(viewstate);
-        modal.dataset.urn = targetModelUrn;
+        modal.dataset.viewstate = JSON.stringify(this.viewer.getState());
+        modal.dataset.urn = this.viewer.model?.getData().urn;
         modal.dataset.itemId = window.currentItemId || null;
 
-        const previewContainer = document.getElementById('modal-image-preview');
-        const previewImg = document.getElementById('issue-preview-img');
-        if (thumbnail && previewContainer && previewImg) {
-            previewImg.src = thumbnail;
-            previewContainer.style.display = 'flex';
-        } else if (previewContainer) {
-            previewContainer.style.display = 'none';
+        // [Fix] showCreateModal에서 thumbnail을 modal.dataset에 반드시 저장
+        if (thumbnail) {
+            modal.dataset.thumbnail = thumbnail;
+            const img = document.getElementById('issue-preview-img');
+            if (img) img.src = thumbnail;
+            const previewWrap = document.getElementById('modal-image-preview');
+            if (previewWrap) previewWrap.style.display = 'flex';
+        } else {
+            modal.dataset.thumbnail = '';
         }
         modal.style.display = 'flex';
-        document.getElementById('issue-title').focus();
 
-        // ── Auto-extract Structure & Work Type (UI-based Logic) ──
-        const structureInput = document.getElementById('issue-structure');
-        const workTypeInput = document.getElementById('issue-work-type');
-        const modelNameTag = document.getElementById('viewer-model-name');
+        // [Safety UI Injection] 작성 시간 독립 주입 (Non-blocking)
+        setTimeout(() => safelyInjectIssueTime(), 100);
 
-        // ── Auto-generate Issue Number ──
-        let issueNumber = `ISSUE-${Date.now().toString().slice(-4)}`; // Fallback
+        // Metadata extraction
+        const parts = (document.getElementById('viewer-model-name')?.innerText || '').split('_');
+        if (parts.length >= 6) {
+            const structure = document.getElementById('issue-structure');
+            const workType = document.getElementById('issue-work-type');
+            if (structure) structure.value = parts[4].split('.')[0];
+            if (workType) {
+                const code = parts[5].split('.')[0].toUpperCase();
+                workType.value = WORK_TYPE_MAPPING[code] || code;
+            }
+        }
+    }
 
-        if (modelNameTag) {
-            const fullText = modelNameTag.innerText || '';
-            console.log('[IssueManager] Parsing UI model name for metadata:', fullText);
-            const parts = fullText.split('_');
+    async populateAssigneeDropdown(selectedValue = "") {
+        const assigneeSelect = document.getElementById('issue-assignee');
+        if (!assigneeSelect || assigneeSelect.tagName !== 'SELECT') return;
 
-            // 1. Structure (5th segment, index 4)
-            if (structureInput) {
-                let structExtracted = '-';
-                if (parts.length >= 5) {
-                    structExtracted = parts[4].split('.')[0];
-                }
-                structureInput.value = structExtracted;
+        assigneeSelect.innerHTML = '<option value="">서버에서 데이터 로딩 중...</option>';
+
+        try {
+            // 🌟 Autodesk에 직접 가지 않고, 우리 백엔드 프록시 서버에 요청!
+            const response = await fetch('/api/forge/members'); 
+            if (!response.ok) throw new Error('백엔드 프록시 통신 실패');
+
+            const data = await response.json();
+            const memberList = data.results || data.users || (Array.isArray(data) ? data : []);
+
+            if (memberList.length === 0) {
+                assigneeSelect.innerHTML = '<option value="">등록된 프로젝트 구성원이 없습니다</option>';
+                return;
             }
 
-            // 2. Work Type (6th segment, index 5)
-            let workExtracted = '-';
-            let workTypeCode = 'XX';
-            if (parts.length >= 6) {
-                workTypeCode = parts[5].split('.')[0].toUpperCase();
-                workExtracted = WORK_TYPE_MAPPING[workTypeCode] || workTypeCode || '-';
-            }
-            if (workTypeInput) workTypeInput.value = workExtracted;
-
-            // 3. Issue Number Generation [WorkType]_[BuildingNumber]_[Sequence]
-            const buildingNum = parts.length > 3 ? parts[3] : '00';
-            const prefix = `${workTypeCode}_${buildingNum}_`;
-
-            let maxSeq = 0;
-            this.issues.forEach(i => {
-                if (i.issue_number && i.issue_number.startsWith(prefix)) {
-                    const seqStr = i.issue_number.split('_').pop();
-                    const seqNum = parseInt(seqStr, 10);
-                    if (!isNaN(seqNum) && seqNum > maxSeq) {
-                        maxSeq = seqNum;
-                    }
+            assigneeSelect.innerHTML = '<option value="">담당자 선택</option>'; 
+            memberList.forEach(user => {
+                const memberName = user.name || user.userName; 
+                if (memberName) {
+                    const option = document.createElement('option');
+                    option.value = memberName;
+                    option.textContent = memberName;
+                    if (memberName === selectedValue) option.selected = true;
+                    assigneeSelect.appendChild(option);
                 }
             });
-            const nextSeq = String(maxSeq + 1).padStart(3, '0');
-            issueNumber = `${prefix}${nextSeq}`;
-            console.log(`[IssueManager] Auto-populated Structure: ${structureInput?.value}, WorkType: ${workTypeInput?.value}, IssueNumber: ${issueNumber}`);
-        }
-
-        modal.dataset.issueNumber = issueNumber;
-        const numberDisplay = document.getElementById('issue-number-display');
-        if (numberDisplay) {
-            numberDisplay.textContent = issueNumber;
+        } catch (error) {
+            console.error("[서버 연동 실패]", error);
+            assigneeSelect.innerHTML = '<option value="">⚠️ 서버 API 에러</option>';
         }
     }
 
     addIssue(data) {
-        console.log('[IssueManager] addIssue process started with object:', data);
-
-        const { title, description, assignee, status, dbId, point, thumbnail, viewstate, urn, resolutionDesc, afterThumbnail, afterViewstate } = data;
-
-        // [Normalization] Explicitly extract structure and work type from all possible input keys
-        const structureName = data.structure_name || data.structureName || data.structure || data.struct || '-';
-        const workType = data.work_type || data.workType || data.work_type || '-';
-
-        // Validation
-        if (!title || !description) {
-            console.warn('[IssueManager] Validation failed: Missing title or description');
-            alert('제목과 내용을 모두 입력해주세요.');
-            return false;
-        }
-
         const issue = {
             id: Date.now(),
-            title,
-            description,
-            assignee: assignee || 'Anonymous',
-            status,
-            dbId,
-            point,
-            thumbnail,
-            viewstate,
-            modelUrn: this.viewer.model ? this.viewer.model.getData().urn : (urn || null),
-            itemId: data.itemId || window.currentItemId || null, // NEW: Cross-version key
-            createdAt: new Date().toISOString(),
-            resolution_description: resolutionDesc || null,
-            after_snapshot_url: afterThumbnail || null,
-            after_viewpoint: afterViewstate || null,
-            // [Filtering Logic] Capture current model GUID as primary filter key
-            modelGuid: (this.viewer.model && this.viewer.model.getGuid) ? this.viewer.model.getGuid() : null,
-            // [Fix] Enforce normalized snake_case keys
-            structure_name: structureName.toString().trim(),
-            work_type: workType.toString().trim(),
-            issue_number: data.issueNumber || `REQ-${Date.now().toString().slice(-4)}`,
-            // [NEW] Metadata for UI Sync
-            hubId: window.currentHubId,
-            projectId: window.currentProjectId,
-            modelName: window.currentModelName
+            ...data,
+            createdAt: new Date().toISOString()
         };
-
-        console.log('[AUDIT] New Issue Data Normalized:', issue);
-
         this.issues.push(issue);
-        this.saveIssues();
+        this.saveIssues(issue); // Pass issue to sync to server
         this.createPin(issue);
-        this.removeTempMarker(); // Clear temporary marker after saving
-
-        // Auto-exit creation mode
+        this.removeTempMarker();
         this.toggleCreationMode(false);
-
-        console.log('[IssueManager] Issue successfully created:', issue.id);
         return true;
     }
 
     updateIssue(id, data) {
-        console.log('[IssueManager] updateIssue process started for ID:', id, 'with object:', data);
-
         const index = this.issues.findIndex(i => i.id === id);
-        if (index === -1) {
-            console.error('[IssueManager] Issue not found for update:', id);
-            return false;
-        }
-
-        const { title, description, assignee, status, resolutionDesc, afterThumbnail, afterViewstate, structureName, workType } = data;
-
-        if (!title || !description) {
-            alert('제목과 내용을 모두 입력해주세요.');
-            return false;
-        }
-
-        // [Normalization] Explicitly extract structure and work type from all possible input keys
-        const structureNameRaw = data.structure_name || data.structureName || data.structure || data.struct || this.issues[index].structure_name || '-';
-        const workTypeRaw = data.work_type || data.workType || data.work_type || this.issues[index].work_type || '-';
-
-        this.issues[index] = {
-            ...this.issues[index],
-            title,
-            description,
-            assignee: assignee || 'Anonymous',
-            status,
-            updatedAt: new Date().toISOString(),
-            resolution_description: status === 'Closed' ? (resolutionDesc || this.issues[index].resolution_description) : this.issues[index].resolution_description,
-            after_snapshot_url: status === 'Closed' ? (afterThumbnail || this.issues[index].after_snapshot_url) : this.issues[index].after_snapshot_url,
-            after_viewpoint: status === 'Closed' ? (afterViewstate || this.issues[index].after_viewpoint) : this.issues[index].after_viewpoint,
-            // [Fix] Enforce normalized snake_case keys
-            structure_name: structureNameRaw.toString().trim(),
-            work_type: workTypeRaw.toString().trim()
-        };
-
-        this.saveIssues();
+        if (index === -1) return false;
+        const updated = { ...this.issues[index], ...data, updatedAt: new Date().toISOString() };
+        this.issues[index] = updated;
+        this.saveIssues(updated); // Pass issue to sync to server
         this.restorePins();
-
-        console.log('[IssueManager] Issue successfully updated (Object):', id);
         return true;
     }
 
-    // ── Markup Tools Implementation ──────────────────────────────────────────
-
     async enterMarkupMode(dbId, point, mode = 'create') {
-        console.log(`[IssueManager] Entering Markup Mode [${mode}]:`, { dbId, point });
+        // [Guard] 툴바 버튼 클릭으로 이미 마크업이 활성화된 경우 중복 로드 방지
+        if (!this.markupsExt) {
+            this.markupsExt = await this.viewer.loadExtension('Autodesk.Viewing.MarkupsCore');
+        }
+        if (this.markupsExt && !this.markupsExt.isInEditMode?.()) {
+            this.markupsExt.enterEditMode();
+        }
 
-        // [Global Sync] Ensure all markers are aligned before entering markup mode
-        this.refreshAllMarkers();
+        // 도화지(SVG) 레이어 강제 최상단 배치
+        const markupSvg = document.querySelector('.markups-svg');
+        if (markupSvg) {
+            markupSvg.style.setProperty('z-index', '9999', 'important');
+            markupSvg.style.setProperty('pointer-events', 'auto', 'important');
+        }
+        
+        console.log("✅ [Issue UI] MarkupsCore 로드 및 마크업 준비 완료");
+        
+        // 전역 접근을 위해 인스턴스 저장
+        window.currentMarkupExt = this.markupsExt;
 
-        // Ensure extension is loaded
-        this.markupsExt = await this.viewer.loadExtension('Autodesk.Viewing.MarkupsCore');
-        this.markupsExt.enterEditMode();
-
-        // Store context with mode
         this.markupContext = { dbId, point, mode };
-
         this.renderMarkupToolbar();
+        
+        // 실제 커스텀 툴바 DOM 요소를 탐색하여 강제 노출
+        const customToolbar = document.querySelector('#markup-toolbar'); 
+        if (customToolbar) {
+            const topBar = document.getElementById('viewer-top-bar') || document.querySelector('.compare-bar');
+            const topBarHeight = topBar ? (topBar.offsetHeight || 50) : 50;
+            customToolbar.style.setProperty('top', `${topBarHeight + 70}px`, 'important');
+            customToolbar.style.setProperty('display', 'flex', 'important');
+            customToolbar.style.setProperty('z-index', '10000', 'important');
+            customToolbar.style.setProperty('position', 'absolute', 'important'); // 화면 가운데 오도록
+            console.log("✅ [Toolbar UI] 커스텀 툴바를 찾아 화면에 노출했습니다:", customToolbar);
+        } else {
+            console.error("❌ [Toolbar UI Error] 커스텀 툴바 요소를 찾지 못했습니다! HTML 구조를 확인하세요.");
+        }
+        
+        // 마크업 모드 진입 시 상단 비교 바 강제 숨김
+        const compareBar = document.getElementById('compare-bar') || document.querySelector('.compare-bar');
+        if (compareBar) {
+            compareBar.style.setProperty('display', 'none', 'important');
+            compareBar.style.setProperty('visibility', 'hidden', 'important');
+            compareBar.style.setProperty('opacity', '0', 'important');
+            compareBar.style.setProperty('z-index', '-1', 'important');
+            console.log("🚨 [Hide Bar Success] compare-bar 강제 숨김 처리 완료");
+        }
     }
 
     renderMarkupToolbar() {
-        if (document.getElementById('markup-toolbar')) return;
-
-        const toolbar = document.createElement('div');
-        toolbar.id = 'markup-toolbar';
-        toolbar.className = 'markup-toolbar';
-        toolbar.innerHTML = `
+        if (document.getElementById('markup-toolbar')) {
+            const existingTb = document.getElementById('markup-toolbar');
+            existingTb.style.setProperty('display', 'flex', 'important');
+            existingTb.style.setProperty('z-index', '10000', 'important');
+            return;
+        }
+        const tb = document.createElement('div');
+        tb.id = 'markup-toolbar';
+        tb.className = 'markup-toolbar';
+        tb.innerHTML = `
             <div class="markup-tool-group">
+                <button class="markup-btn" data-tool="freehand" title="Pen"><i class="fas fa-pen"></i></button>
                 <button class="markup-btn" data-tool="rectangle" title="Rectangle"><i class="fas fa-square"></i></button>
                 <button class="markup-btn" data-tool="cloud" title="Cloud"><i class="fas fa-cloud"></i></button>
                 <button class="markup-btn" data-tool="arrow" title="Arrow"><i class="fas fa-long-arrow-alt-right"></i></button>
                 <button class="markup-btn" data-tool="text" title="Text"><i class="fas fa-font"></i></button>
             </div>
-            <div class="markup-palette">
-                <div class="color-dot active" data-color="#ff0000" style="background:#ff0000;"></div>
-                <div class="color-dot" data-color="#0000ff" style="background:#0000ff;"></div>
-                <div class="color-dot" data-color="#ffff00" style="background:#ffff00;"></div>
-            </div>
-            <div class="markup-style-controls">
-                <label>Size:</label>
-                <input type="range" class="markup-slider" min="0.1" max="20" step="0.1" value="1">
-                <input type="number" class="markup-num-input" value="1" min="0.1" max="20" step="0.1">
+            <div class="markup-style-group" style="display:flex; align-items:center; gap:10px; margin: 0 15px;">
+                <input type="color" id="markup-color-picker" value="#FF0000" title="선 색상">
+                <input type="range" id="markup-width-slider" min="0.1" max="15" step="0.1" value="2.5" title="선 두께 슬라이더" style="width: 80px;">
+                <input type="number" id="markup-width-input" min="0.1" max="15" step="0.1" value="2.5" title="선 두께 숫자" style="width: 60px;">
             </div>
             <button class="markup-finish-btn">작성 완료</button>
         `;
-
-        document.body.appendChild(toolbar);
-        this._bindMarkupEvents(toolbar);
-
-        // Set default tool
-        toolbar.querySelector('[data-tool="rectangle"]').click();
-    }
-
-    _bindMarkupEvents(toolbar) {
-        const ext = this.markupsExt;
-
-        // Tool Selection
-        toolbar.querySelectorAll('.markup-btn').forEach(btn => {
+        document.body.appendChild(tb);
+        
+        // 뷰어나 다른 UI에 가려지지 않도록 강제 노출
+        tb.style.setProperty('display', 'flex', 'important');
+        tb.style.setProperty('z-index', '10000', 'important');
+        
+        tb.querySelectorAll('.markup-btn').forEach(btn => {
             btn.onclick = () => {
-                toolbar.querySelectorAll('.markup-btn').forEach(b => b.classList.remove('active'));
-                btn.classList.add('active');
-
                 const tool = btn.dataset.tool;
                 let markupTool;
                 switch (tool) {
-                    case 'rectangle': markupTool = new Autodesk.Viewing.Extensions.Markups.Core.EditModeRectangle(ext); break;
-                    case 'cloud': markupTool = new Autodesk.Viewing.Extensions.Markups.Core.EditModeCloud(ext); break;
-                    case 'arrow': markupTool = new Autodesk.Viewing.Extensions.Markups.Core.EditModeArrow(ext); break;
-                    case 'text': markupTool = new Autodesk.Viewing.Extensions.Markups.Core.EditModeText(ext); break;
+                    case 'freehand': markupTool = new Autodesk.Viewing.Extensions.Markups.Core.EditModeFreehand(this.markupsExt); break;
+                    case 'rectangle': markupTool = new Autodesk.Viewing.Extensions.Markups.Core.EditModeRectangle(this.markupsExt); break;
+                    case 'cloud': markupTool = new Autodesk.Viewing.Extensions.Markups.Core.EditModeCloud(this.markupsExt); break;
+                    case 'arrow': markupTool = new Autodesk.Viewing.Extensions.Markups.Core.EditModeArrow(this.markupsExt); break;
+                    case 'text': markupTool = new Autodesk.Viewing.Extensions.Markups.Core.EditModeText(this.markupsExt); break;
                 }
-                ext.changeEditMode(markupTool);
-
-                // [Hard Fix] Force inject current styles immediately upon tool selection
-                const color = toolbar.querySelector('.color-dot.active').dataset.color;
-                const size = parseFloat(toolbar.querySelector('.markup-num-input').value);
-                ext.setStyle({
-                    'stroke-color': color,
-                    'stroke-width': size,
-                    'stroke-opacity': 1,
-                    'fill-color': color,
-                    'fill-opacity': 0.1,
-                    'font-size': size * 5
-                });
+                
+                // 마크업 툴 변경 (API 버전에 맞게 방어적 호출)
+                if (this.markupsExt.changeEditMode) {
+                    this.markupsExt.changeEditMode(markupTool);
+                } else if (this.markupsExt.changeShape) {
+                    this.markupsExt.changeShape(markupTool);
+                }
             };
         });
 
-        // Color Palette
-        toolbar.querySelectorAll('.color-dot').forEach(dot => {
-            dot.onclick = () => {
-                toolbar.querySelectorAll('.color-dot').forEach(d => d.classList.remove('active'));
-                dot.classList.add('active');
-                const color = dot.dataset.color;
+        tb.querySelector('.markup-finish-btn').onclick = async () => {
+            const svg = this.markupsExt.generateData(); // 데이터 추출
+            await this._captureMarkupScreenshot(svg);
+            this.markupsExt.leaveEditMode();
+            this.markupsExt.hide();
+            
+            // UI를 안전하게 숨김 또는 제거
+            tb.style.setProperty('display', 'none', 'important');
+            tb.remove();
+            
+            this.markupsExt = null; // 마크업 종료 시 인스턴스 해제로 전역 이벤트 오작동 방지
 
-                const style = {
-                    'stroke-color': color,
-                    'stroke-opacity': 1,
-                    'fill-color': color,
-                    'fill-opacity': 0.1
-                };
-                ext.setStyle(style);
-            };
-        });
-
-        // [Nuclear Option] 무한 루프 차단을 위한 상태 잠금(State Locking) 로직
-        const slider = toolbar.querySelector('.markup-slider');
-        const numInput = toolbar.querySelector('.markup-num-input');
-        let isUpdatingMarkup = false;
-
-        const updateSize = (val) => {
-            if (isUpdatingMarkup) return; // 상태 잠금 시 즉시 반환
-
-            // 0.1 단위 정밀도 강제 정규화 (부동 소수점 오차 제거)
-            const normalizedVal = Math.round(parseFloat(val) * 10) / 10;
-            if (isNaN(normalizedVal)) return;
-
-            isUpdatingMarkup = true;
-
-            // 엔진 상태 확인 및 비교
-            const currentStyle = ext.getStyle();
-            const currentEngineVal = Math.round(parseFloat(currentStyle['stroke-width'] || 0) * 10) / 10;
-
-            if (normalizedVal !== currentEngineVal) {
-                // 엔진과 값이 다를 때만 업데이트 실행
-                ext.setStyle({
-                    'stroke-width': normalizedVal,
-                    'font-size': normalizedVal * 5
-                });
+            // [UI] 마크업 완료 시 상단 비교 바 복구 (CSS 클래스 토글 방식)
+            const compareBarToRestore = document.getElementById('compare-bar') || document.querySelector('.compare-bar');
+            if (compareBarToRestore) {
+                compareBarToRestore.style.setProperty('display', 'flex', 'important'); // 기존 레이아웃에 맞게 flex 또는 block
+                compareBarToRestore.style.setProperty('visibility', 'visible', 'important');
+                compareBarToRestore.style.setProperty('opacity', '1', 'important');
+                compareBarToRestore.style.setProperty('z-index', '10', 'important');
+                console.log("✅ [Show Bar] compare-bar 복구 완료");
             }
-
-            // UI 동기화 (슬라이더 및 숫자 입력창)
-            if (Math.round(parseFloat(slider.value) * 10) / 10 !== normalizedVal) slider.value = normalizedVal;
-            if (Math.round(parseFloat(numInput.value) * 10) / 10 !== normalizedVal) numInput.value = normalizedVal;
-
-            // 50ms 후 잠금 해제 (이벤트 루프 분리)
-            setTimeout(() => { isUpdatingMarkup = false; }, 50);
-        };
-
-        // 엔진 이벤트를 UI에 반영할 때도 상태 잠금 확인
-        const onMarkupSelected = () => {
-            if (isUpdatingMarkup) return;
-            const style = ext.getStyle();
-            if (style && style['stroke-width']) {
-                const engineVal = Math.round(parseFloat(style['stroke-width']) * 10) / 10;
-                slider.value = engineVal;
-                numInput.value = engineVal;
-            }
-        };
-        ext.addEventListener(Autodesk.Viewing.Extensions.Markups.Core.EVENT_MARKUP_SELECTED, onMarkupSelected);
-        ext.addEventListener(Autodesk.Viewing.Extensions.Markups.Core.EVENT_EDIT_MODE_CHANGED, onMarkupSelected);
-        slider.oninput = (e) => updateSize(e.target.value);
-        numInput.oninput = (e) => updateSize(e.target.value);
-
-        // Finish Button
-        toolbar.querySelector('.markup-finish-btn').onclick = async () => {
-            const svgMarkup = ext.generateData();
-
-            // [Critical Fix] Capture BEFORE leaving edit mode or hiding
-            console.log('[IssueManager] Initiating capture while markups are active...');
-            await this._captureMarkupScreenshot(svgMarkup);
-
-            // [Cleanup] Only after capture is initiated/processed
-            ext.removeEventListener(Autodesk.Viewing.Extensions.Markups.Core.EVENT_MARKUP_SELECTED, onMarkupSelected);
-            ext.removeEventListener(Autodesk.Viewing.Extensions.Markups.Core.EVENT_EDIT_MODE_CHANGED, onMarkupSelected);
-            ext.leaveEditMode();
-            ext.hide();
-            toolbar.remove();
         };
     }
 
-    async _captureMarkupScreenshot(svgData) {
+    async _captureMarkupScreenshot(svg) {
         const mode = this.markupContext?.mode || 'create';
-        console.log(`[IssueManager] Rendering markup screenshot for mode: ${mode}`);
-
-        // [Global Sync] Final alignment before capture
-        this.refreshAllMarkers();
-
-        return new Promise((resolve) => {
-            this.captureIssueThumbnail((base64) => {
+        return new Promise(resolve => {
+            this.captureIssueThumbnail(b64 => {
                 const modal = document.getElementById('issue-modal');
-
-                if (mode === 'create') {
-                    // Standard creation flow
-                    this.showCreateModal(this.markupContext.dbId, this.markupContext.point, base64);
-                } else {
-                    // Resolution (Closed) flow: update existing edit modal
-                    if (modal && base64) {
-                        modal.dataset.afterThumbnail = base64;
-                        const afterPreviewImg = document.getElementById('issue-after-preview-img');
-                        const afterPreviewContainer = document.getElementById('modal-after-image-preview');
-                        if (afterPreviewImg && afterPreviewContainer) {
-                            afterPreviewImg.src = base64;
-                            afterPreviewContainer.style.display = 'flex';
-                        }
-                        // Re-show modal after drawing is finished
-                        modal.style.display = 'flex';
-                    }
+                if (mode === 'create') this.showCreateModal(this.markupContext?.dbId || null, this.markupContext?.point || null, b64);
+                else if (modal) {
+                    modal.dataset.afterThumbnail = b64;
+                    const prev = document.getElementById('issue-after-preview-img');
+                    if (prev) { prev.src = b64; document.getElementById('modal-after-image-preview').style.display = 'flex'; }
+                    modal.style.display = 'flex';
                 }
-
-                if (modal) modal.dataset.markup = svgData;
+                if (modal) modal.dataset.markup = svg;
                 resolve();
             }, this.markupsExt);
         });
     }
 
-    deleteIssue(id) {
-        console.log('[IssueManager] deleteIssue requested for ID:', id);
-
-        if (!confirm('정말 이 이슈를 삭제하시겠습니까?')) return;
-
-        this.issues = this.issues.filter(i => i.id !== id);
-        this.saveIssues();
-        this.restorePins();
-
-        console.log('[IssueManager] Issue deleted:', id);
-    }
-
     createPin(issue) {
-        // [Nuclear Step 3] Create HTML-based Marker for Interaction
+        if (!issue || !issue.id) return;
+        if (!issue.point || typeof issue.point.x === 'undefined') {
+            console.warn("[IssueManager] createPin: 3D 좌표(point)가 누락되어 핀을 생성할 수 없습니다.", issue);
+            return;
+        }
+
+        if (this.htmlMarkersMap.has(issue.id)) return;
         const marker = document.createElement('div');
         marker.className = 'issue-marker';
         if (issue.status === 'Closed') marker.classList.add('green');
+        marker.dataset.id = issue.id;
+        marker.dataset.dbId = issue.dbId || '';
 
-        // Source of Truth Data Binding
-        marker.dataset.issueId = issue.id;
-        marker.dataset.worldPos = JSON.stringify(issue.point);
+        // [Fix] unreadManager TypeError 방지 (Optional Chaining & Fallback)
+        let isUnread = false;
+        if (typeof unreadManager !== 'undefined' && unreadManager && typeof unreadManager.isUnread === 'function') {
+            try { isUnread = unreadManager.isUnread(issue.id); } catch (e) { }
+        }
 
-        // Position Marker Initial Projection
-        const pos = new THREE.Vector3(issue.point.x, issue.point.y, issue.point.z);
-        const screenPoint = this.viewer.worldToClient(pos);
-        marker.style.left = `${screenPoint.x}px`;
-        marker.style.top = `${screenPoint.y}px`;
-
-        // Click Event: Open Edit Modal
+        if (isUnread) {
+            const b = document.createElement('div');
+            b.className = 'marker-unread-badge'; b.textContent = 'N';
+            marker.appendChild(b);
+        }
+        // [Fix] 아이콘 중복 렌더링 삭제: CSS 원형 마커만 표시
+        // marker.innerHTML += '<i class="fas fa-map-marker-alt"></i>';
+        
+        this.viewer.container.appendChild(marker);
         marker.onclick = (e) => {
             e.stopPropagation();
-            console.log(`[IssueManager] Marker clicked! Issue ID: ${issue.id}`);
+            e.preventDefault(); // [Fix] 부작용 방지
+            
+            if (typeof unreadManager !== 'undefined' && unreadManager && typeof unreadManager.markAsRead === 'function') {
+                if (unreadManager.markAsRead(issue.id)) {
+                    const b = marker.querySelector('.marker-unread-badge');
+                    if (b) b.remove();
+                    this.renderIssueList();
+                }
+            }
+            this.focusIssue(issue);
+            // [Fix] 마커 클릭 시 팝업창(수정 모달) 열기 연동
             this.showEditModal(issue.id);
         };
-
-        this.viewer.container.appendChild(marker);
-
-        // Store for camera sync and cleanup
         this.htmlMarkersMap.set(issue.id, {
             element: marker,
-            position: pos
+            position: new THREE.Vector3(issue.point.x, issue.point.y, issue.point.z)
         });
+        this._applyTargetFilter(issue.id);
+    }
+
+    _applyTargetFilter(id) {
+        const data = this.htmlMarkersMap.get(id);
+        const issue = this.issues.find(i => i.id === id);
+        if (!data || !issue) return;
+        let visible = true;
+        if (this.activeStructureFilter && issue.structure_name !== this.activeStructureFilter) visible = false;
+        if (this.activeWorkTypeFilter && issue.work_type !== this.activeWorkTypeFilter) visible = false;
+        data.element.style.visibility = (visible && this.markersVisible !== false) ? 'visible' : 'hidden';
     }
 
     restorePins() {
-        // 3. Cleanup existing HTML markers and reconstruct
-        setTimeout(() => {
-            // Remove from DOM
-            this.htmlMarkersMap.forEach(data => {
-                if (data.element && data.element.parentNode) {
-                    data.element.parentNode.removeChild(data.element);
-                }
-            });
+        try {
+            this.htmlMarkersMap.forEach(d => d.element.remove());
             this.htmlMarkersMap.clear();
 
-            // Legend removal (if any legacy pins existed)
-            if (this.viewer.impl.hasOverlayScene && this.viewer.impl.hasOverlayScene('issue-markers')) {
-                this.viewer.impl.clearOverlay('issue-markers');
+            // [Fix] getGuid()는 APS Viewer API에 존재하지 않으므로 getUrn()으로 교체
+            let urn = null;
+            try {
+                urn = this.viewer.model?.getData()?.urn || this.viewer.model?.getUrn?.();
+            } catch (e) {
+                console.warn('[IssueManager] 모델 URN 추출 실패 (핀 필터링 없이 전체 표시):', e);
             }
 
-            // [Async Guard]
-            let currentModelGuid = null;
-            try { currentModelGuid = (this.viewer.model && this.viewer.model.getGuid) ? this.viewer.model.getGuid() : null; } catch (e) { }
-
-            this.issues.forEach(issue => {
-                try {
-                    const rawIssueGuid = issue.modelGuid || issue.modelId || issue.modelUrn || '';
-                    const issueModelId = String(rawIssueGuid).trim().toLowerCase();
-                    const targetModelId = String(currentModelGuid || '').trim().toLowerCase();
-
-                    console.log(`[Diagnostic] Issue: ${issue.id}, Stored: ${rawIssueGuid}, Current: ${currentModelGuid}`);
-
-                    // [Multi-Criteria Filter] Structure AND WorkType
-                    const structureFilter = this.activeStructureFilter;
-                    const workTypeFilter = this.activeWorkTypeFilter;
-
-                    if (structureFilter !== null || workTypeFilter !== null) {
-                        const issueStruct = String(issue.structure_name || issue.structureName || '').trim().toLowerCase();
-                        const issueWork = String(issue.work_type || issue.workType || '').trim().toLowerCase();
-                        const targetStruct = String(structureFilter || '').trim().toLowerCase();
-                        const targetWork = String(workTypeFilter || '').trim().toLowerCase();
-
-                        const structMatch = !structureFilter || (issueStruct && issueStruct === targetStruct);
-                        const workMatch = !workTypeFilter || (issueWork && issueWork === targetWork);
-
-                        if (!structMatch || !workMatch) {
-                            console.log(`[Multi-Criteria] Filtered out issue ${issue.id} (struct:${issueStruct}/${targetStruct}, work:${issueWork}/${targetWork})`);
-                            return;
-                        }
-                    }
-
-                    // [URN Filter] Compare by decoded base URN, version-agnostic
-                    const decodeUrn = (s) => {
-                        try {
-                            // Convert base64url → base64 → decode
-                            return atob(s.replace(/-/g, '+').replace(/_/g, '/'));
-                        } catch (e) {
-                            return s; // Not base64, use as-is
-                        }
-                    };
-                    const baseUrn = (s) => decodeUrn(String(s || '').trim()).split('?')[0].toLowerCase().trim();
-
-                    const currentUrn = String(
-                        (this.viewer.model && this.viewer.model.getData)
-                            ? (this.viewer.model.getData().urn || '') : ''
-                    ).trim();
-                    const storedUrn = String(issue.modelUrn || issue.modelGuid || issue.modelId || '').trim();
-
-                    const currentBase = baseUrn(currentUrn);
-                    const storedBase = baseUrn(storedUrn);
-
-                    console.log(`[URN Filter] Issue ${issue.id} | storedBase: "${storedBase}" | currentBase: "${currentBase}"`);
-
-                    // Match = same file regardless of version; Legacy = no URN stored at all
-                    const isMatch = storedBase && currentBase && (storedBase === currentBase);
-                    const isLegacy = !storedUrn;
-
-                    if (!isMatch && !isLegacy) {
-                        console.warn(`[URN Filter] Skipping issue ${issue.id} — model mismatch`);
-                        return;
-                    }
-
-                    this.createPin(issue);
-                } catch (pinErr) {
-                    console.error(`[Emergency] Failed to render pin for issue ${issue.id}:`, pinErr);
-                }
+            // [Fix] 현재 로드된 모델의 URN을 기준으로 filter() 적용 (오류가 있던 modelGuid 참조 변경)
+            const filteredIssues = this.issues.filter(i => {
+                if (!urn) return true; // 현재 모델 정보가 없을 땐 모두 표시
+                if (!i.urn) return true; // 예외적으로 urn 정보 없이 생성된 구 이슈
+                return i.urn === urn;
             });
-        }, 200);
-    }
-
-    /**
-     * [Multi-Criteria Filter] Set the active structure/workType criteria for marker rendering.
-     * Pass null to a field to disable that filter.
-     * @param {string|null} structure - Structure name to filter by (e.g. '101동')
-     * @param {string|null} workType  - Work type to filter by (e.g. '토목')
-     */
-    setMarkerFilter(structure, workType) {
-        this.activeStructureFilter = structure || null;
-        this.activeWorkTypeFilter = workType || null;
-        console.log(`[Multi-Criteria] Filter set → structure: "${structure}", workType: "${workType}"`);
-        this.restorePins(); // Immediately re-render with new filter
+            
+            filteredIssues.forEach(i => this.createPin(i));
+            this.syncAllMarkers();
+        } catch (error) {
+            console.error('[IssueManager] Failed to restore pins:', error);
+        }
     }
 
     renderIssueList() {
         const container = document.getElementById('issue-list-container');
         if (!container) return;
-
-        // [수정] 버전 필터링 로직 제거 및 디버깅 로그 추가
-        console.log('--- [DEBUG] Issue Rendering Audit ---');
-        console.log('Total Issues in Memory:', this.issues.length);
-        console.log('Raw Data Array:', this.issues);
-
-        // 컨테이너 초기화
-        container.innerHTML = '';
-
         if (this.issues.length === 0) {
-            container.innerHTML = '<p class="issue-empty">No issues found.</p>';
+            container.innerHTML = '<div class="issue-empty-state"><p>등록된 이슈가 없습니다.</p></div>';
             return;
         }
+        const sorted = [...this.issues].sort((a, b) => b.id - a.id);
 
-        // 전체 렌더링 강제 (forEach 사용)
-        const htmlParts = [];
-        this.issues.forEach(issue => {
-            const isRead = unreadManager.isRead(issue.id);
-            const nameClass = isRead ? 'read-item-name' : 'unread-item-name';
+        // [DEBUG] 이슈 데이터 구조 확인 - 썸네일 키 파악용
+        if (sorted.length > 0) {
+            console.log('[DEBUG] 이슈 데이터 샘플 (thumbnail 키 확인):', JSON.stringify(Object.keys(sorted[0])));
+            console.log('[DEBUG] thumbnail 값 타입:', typeof sorted[0].thumbnail, '| 길이:', (sorted[0].thumbnail || '').length);
+        }
 
-            htmlParts.push(`
-            <div class="issue-item" data-id="${issue.id}" data-structure="${issue.structure_name || ''}">
-                <div class="issue-item-main">
-                    <label style="display:flex;align-items:flex-start;padding-right:6px;margin-top:2px;cursor:pointer;" onclick="event.stopPropagation()">
-                        <input type="checkbox" class="issue-check" data-id="${issue.id}"
-                            style="cursor:pointer;margin-top:3px;accent-color:#6366f1;" />
-                    </label>
-                    ${issue.thumbnail ? `<img src="${issue.thumbnail}" class="issue-thumbnail" alt="Issue Screenshot">` : ''}
-                    <div class="issue-info">
-                        <div class="issue-item-header">
-                            <span class="issue-status-badge ${issue.status.toLowerCase()}">${issue.status}</span>
-                            <span class="issue-item-title ${nameClass}" title="${issue.title}">${issue.title}</span>
-                            <div class="issue-item-actions">
-                                ${issue.status === 'Closed' ? `<button class="issue-btn-pdf" title="Export PDF" style="background:rgba(16,185,129,0.15);border:1px solid rgba(16,185,129,0.3);color:#10b981;">📄</button>` : ''}
-                                <button class="issue-btn-edit" title="Edit">✎</button>
-                                <button class="issue-btn-delete" title="Delete">✕</button>
+        container.innerHTML = sorted.map(i => {
+            // [Fix] unreadManager TypeError 방지
+            let isUnread = false;
+            if (typeof unreadManager !== 'undefined' && unreadManager && typeof unreadManager.isUnread === 'function') {
+                try { isUnread = unreadManager.isUnread(i.id); } catch (e) { }
+            }
+            return `
+                <div class="issue-item ${isUnread ? 'unread' : ''}" data-id="${i.id}">
+                    <div class="issue-item-main">
+                        <label class="issue-check-wrap" onclick="event.stopPropagation()">
+                            <input type="checkbox" class="issue-check" data-id="${i.id}">
+                        </label>
+                        <img src="${i.thumbnail || i.afterThumbnail || ''}" class="issue-thumbnail" onerror="this.style.visibility='hidden'">
+                        <div class="issue-info">
+                            <div class="issue-item-header">
+                                <span class="issue-status-badge ${i.status.toLowerCase()}">${i.status}</span>
+                                <span class="issue-item-title">${i.title}</span>
+                                <div class="issue-item-actions">
+                                    ${(i.status || '').toLowerCase() === 'closed' ? `<button class="issue-btn-pdf" title="Export PDF">📄</button>` : ''}
+                                    ${(i.status || '').toLowerCase() === 'closed' ? `<button class="issue-btn-resolve" title="해결 상태 캡처"><i class="fas fa-camera"></i></button>` : ''}
+                                    <button class="issue-btn-edit"><i class="fas fa-edit"></i></button>
+                                    <button class="issue-btn-delete"><i class="fas fa-trash-alt"></i></button>
+                                </div>
                             </div>
-                        </div>
-                        <div class="issue-item-desc">${issue.description}</div>
-                        <div class="issue-item-meta">
-                            <span>👤 ${issue.assignee}</span>
-                            <span>📍 ID: ${issue.dbId}</span>
+                            <div class="issue-item-desc">${i.description}</div>
                         </div>
                     </div>
                 </div>
-            </div>
-            `);
-        });
+            `;
+        }).join('');
 
-        container.innerHTML = htmlParts.join('');
-
-        // Bind checkbox events to update bulk button label
-        container.querySelectorAll('.issue-check').forEach(chk => {
-            chk.addEventListener('change', () => this._updateBulkBtnLabel());
-        });
-
-        // Action Handlers
         container.querySelectorAll('.issue-item').forEach(item => {
             const id = parseInt(item.dataset.id);
             const issue = this.issues.find(i => i.id === id);
-
-            // Focus on Click
             item.onclick = (e) => {
-                if (e.target.tagName === 'BUTTON') return;
+                if (e.target.closest('button') || e.target.closest('input')) return;
 
-                // [Unread Status] Mark as read
-                if (unreadManager.markAsRead(id)) {
-                    this.renderIssueList();
+                if (typeof unreadManager !== 'undefined' && unreadManager && typeof unreadManager.markAsRead === 'function') {
+                    if (unreadManager.markAsRead(id)) {
+                        item.classList.remove('unread');
+                        const m = this.htmlMarkersMap.get(id);
+                        if (m) { const b = m.element.querySelector('.marker-unread-badge'); if (b) b.remove(); }
+                    }
                 }
-
-                if (issue) this.focusIssue(issue);
+                this.focusIssue(issue);
             };
-
-            // PDF Export Button (only for Closed issues)
             const pdfBtn = item.querySelector('.issue-btn-pdf');
-            if (pdfBtn) {
-                pdfBtn.onclick = (e) => {
+            if (pdfBtn) pdfBtn.onclick = (e) => { e.stopPropagation(); this.openPdfExportModal(id); };
+
+            // [Fix] 카메라(해결) 아이콘 클릭 시 마크업 모드 진입 바인딩
+            const resolveBtn = item.querySelector('.issue-btn-resolve');
+            if (resolveBtn) {
+                resolveBtn.onclick = (e) => {
                     e.stopPropagation();
-                    this.openPdfExportModal(id);
+                    this.focusIssue(issue);
+                    setTimeout(() => {
+                        this.enterMarkupMode(id, new THREE.Vector3(issue.point.x, issue.point.y, issue.point.z), 'resolve');
+                    }, 500); // 줌 이동 시간 대기 후 캡처 트리거
                 };
             }
 
-            // Edit Button
-            item.querySelector('.issue-btn-edit').onclick = (e) => {
-                e.stopPropagation();
-                this.showEditModal(id);
-            };
-
-            // Delete Button
-            item.querySelector('.issue-btn-delete').onclick = (e) => {
-                e.stopPropagation();
-                this.deleteIssue(id);
-            };
+            item.querySelector('.issue-btn-edit').onclick = (e) => { e.stopPropagation(); this.showEditModal(id); };
+            item.querySelector('.issue-btn-delete').onclick = (e) => { e.stopPropagation(); this.deleteIssue(id); };
+            item.querySelector('.issue-check').onchange = () => this._updateBulkBtnLabel();
         });
-
-        // Setup bulk export button (once per render)
-        this.setupBulkExportButton();
-
-        // Update issue count badge
-        const badge = document.getElementById('issue-count');
-        if (badge) badge.textContent = this.issues.length;
+        this._updateBulkBtnLabel();
     }
 
     _updateBulkBtnLabel() {
         const btn = document.getElementById('bulk-pdf-btn');
         if (!btn) return;
         const checked = document.querySelectorAll('.issue-check:checked').length;
-        btn.textContent = checked > 0 ? `📄 선택 내보내기 (${checked})` : '📄 전체 내보내기';
-    }
-
-    setupBulkExportButton() {
-        const btn = document.getElementById('bulk-pdf-btn');
-        if (!btn || btn.dataset.bound) return;
-        btn.dataset.bound = '1';
-
-        btn.onclick = () => {
-            const checked = [...document.querySelectorAll('.issue-check:checked')];
-            let targetIssues;
-            if (checked.length > 0) {
-                const ids = checked.map(c => parseInt(c.dataset.id));
-                targetIssues = this.issues.filter(i => ids.includes(i.id));
-            } else {
-                targetIssues = [...this.issues];
-            }
-
-            if (targetIssues.length === 0) {
-                alert('내보낼 이슈가 없습니다.');
-                return;
-            }
-
-            const modal = document.getElementById('pdf-export-modal');
-            if (!modal) return;
-
-            // [Fix] Store directly on instance, not in dataset
-            this.exportPayload = [...targetIssues];
-            modal.dataset.issueId = '';
-
-            this.setupPdfModalListeners();
-            this._populatePdfItemList();
-            modal.style.display = 'flex';
-        };
-    }
-
-    setupPdfModalListeners() {
-        const modal = document.getElementById('pdf-export-modal');
-        if (!modal || modal.dataset.listenersBound) return;
-        modal.dataset.listenersBound = '1';
-
-        document.getElementById('close-pdf-modal').onclick = () => { modal.style.display = 'none'; };
-        document.getElementById('cancel-pdf-btn').onclick = () => { modal.style.display = 'none'; };
-
-        // [Field Selector] 전체 선택/해제 버튼
-        const fieldAllBtn = document.getElementById('pdf-field-select-all-btn');
-        if (fieldAllBtn) {
-            fieldAllBtn.onclick = () => {
-                const fieldChecks = document.querySelectorAll('#pdf-field-list input[type="checkbox"]');
-                const allChecked = [...fieldChecks].every(c => c.checked);
-                fieldChecks.forEach(c => { c.checked = !allChecked; });
-                fieldAllBtn.textContent = allChecked ? '전체 선택' : '전체 해제';
-            };
-        }
-
-        document.getElementById('run-pdf-export-btn').onclick = async () => {
-            const runBtn = document.getElementById('run-pdf-export-btn');
-            runBtn.textContent = 'Generating...';
-            runBtn.disabled = true;
-
-            try {
-                // [New] 1. Collect Selected Fields (sf) using consistent IDs
-                const sf = {
-                    no: document.getElementById('pdf-field-no').checked,
-                    structure: document.getElementById('pdf-field-structure').checked,
-                    work_type: document.getElementById('pdf-field-worktype').checked,
-                    description: document.getElementById('pdf-field-description').checked,
-                    resolution: document.getElementById('pdf-field-resolution').checked,
-                    screenshot: document.getElementById('pdf-field-images').checked
-                };
-
-                // 2. Filter Issues based on Checkboxes in Modal (Real-time sync)
-                const checkedIssueIds = [...document.querySelectorAll('.pdf-issue-check:checked')]
-                    .map(el => parseInt(el.dataset.id));
-
-                const issuesToExport = this.exportPayload.filter(i => checkedIssueIds.includes(i.id));
-
-                if (issuesToExport.length === 0) {
-                    alert('내보낼 항목을 하나 이상 선택해주세요.');
-                    runBtn.textContent = 'Generate PDF';
-                    runBtn.disabled = false;
-                    return;
-                }
-
-                await this.exportToPdf(issuesToExport, sf);
-            } catch (err) {
-                console.error('[PDF Export] Listener error:', err);
-            } finally {
-                runBtn.textContent = 'Generate PDF';
-                runBtn.disabled = false;
-                modal.style.display = 'none';
-            }
-        };
-
-        // [New] 3. "Select All" Button for Issues
-        const allBtn = document.getElementById('pdf-all-issues-btn');
-        if (allBtn) {
-            allBtn.onclick = () => {
-                const checks = document.querySelectorAll('.pdf-issue-check');
-                const allChecked = [...checks].every(c => c.checked);
-                checks.forEach(c => c.checked = !allChecked);
-                allBtn.textContent = allChecked ? '전체 선택' : '전체 해제';
-            };
-        }
-    }
-
-    _populatePdfItemList() {
-        const listEl = document.getElementById('pdf-item-list');
-        const selectAllBtn = document.getElementById('pdf-select-all-btn');
-        if (!listEl) return;
-
-        const issues = this.exportPayload || [];
-
-        if (issues.length === 0) {
-            listEl.innerHTML = '<p style="color:#94a3b8;font-size:12px;margin:0;padding:6px 0;">표시할 이슈가 없습니다.</p>';
-            return;
-        }
-
-        listEl.innerHTML = issues.map(issue => {
-            const label = issue.issue_number
-                ? `[${issue.issue_number}] ${issue.title}`
-                : `[#${issue.id}] ${issue.title}`;
-            const statusColor = issue.status === 'Closed' ? '#10b981' : '#f59e0b';
-            return `
-                <label style="display:flex;align-items:center;gap:8px;padding:5px 4px;border-radius:4px;cursor:pointer;font-size:13px;color:#1e293b;user-select:none;" class="pdf-item-label">
-                    <input type="checkbox" class="pdf-issue-check" data-id="${issue.id}" checked
-                        style="cursor:pointer;accent-color:#6366f1;width:15px;height:15px;flex-shrink:0;" />
-                    <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${statusColor};flex-shrink:0;"></span>
-                    <span style="flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="${label}">${label}</span>
-                </label>
-            `;
-        }).join('');
-
-        // Hover effect
-        listEl.querySelectorAll('.pdf-item-label').forEach(lbl => {
-            lbl.addEventListener('mouseenter', () => lbl.style.background = '#f1f5f9');
-            lbl.addEventListener('mouseleave', () => lbl.style.background = '');
-        });
-
-        // "전체 선택" button toggle
-        if (selectAllBtn) {
-            selectAllBtn.onclick = () => {
-                const allChecks = listEl.querySelectorAll('input[type="checkbox"]');
-                const allChecked = [...allChecks].every(c => c.checked);
-                allChecks.forEach(c => { c.checked = !allChecked; });
-                selectAllBtn.textContent = allChecked ? '전체 선택' : '전체 해제';
-            };
-        }
-
-        console.log(`[PdfItemList] Rendered ${issues.length} items.`);
-    }
-
-    showEditModal(id) {
-        const issue = this.issues.find(i => i.id === id);
-        if (!issue) return;
-
-        const modal = document.getElementById('issue-modal');
-        if (!modal) return;
-
-        // Pre-fill modal
-        modal.dataset.mode = 'edit';
-        modal.dataset.editId = id;
-        document.getElementById('issue-title').value = issue.title;
-        document.getElementById('issue-desc').value = issue.description;
-        document.getElementById('issue-assignee').value = issue.assignee;
-        document.getElementById('issue-status').value = issue.status;
-        document.getElementById('issue-structure').value = issue.structure_name || '';
-        document.getElementById('issue-work-type').value = issue.work_type || '';
-
-        // Populate Resolution fields
-        const resDescInput = document.getElementById('issue-resolution-desc');
-        const resSection = document.getElementById('issue-resolution-section');
-        const afterPreviewContainer = document.getElementById('modal-after-image-preview');
-        const afterPreviewImg = document.getElementById('issue-after-preview-img');
-
-        if (issue.status === 'Closed') {
-            if (resSection) resSection.style.display = 'block';
-            if (resDescInput) resDescInput.value = issue.resolution_description || '';
-
-            if (issue.after_snapshot_url && afterPreviewContainer && afterPreviewImg) {
-                afterPreviewImg.src = issue.after_snapshot_url;
-                afterPreviewContainer.style.display = 'flex';
-                modal.dataset.afterThumbnail = issue.after_snapshot_url;
-            } else {
-                if (afterPreviewContainer) afterPreviewContainer.style.display = 'none';
-            }
-            if (issue.after_viewpoint) {
-                modal.dataset.afterViewstate = JSON.stringify(issue.after_viewpoint);
-            }
-        } else {
-            if (resSection) resSection.style.display = 'none';
-            if (resDescInput) resDescInput.value = '';
-            if (afterPreviewContainer) afterPreviewContainer.style.display = 'none';
-            delete modal.dataset.afterThumbnail;
-            delete modal.dataset.afterViewstate;
-        }
-
-        // Update UI
-        modal.querySelector('.modal-header h3').textContent = 'Edit Issue';
-        document.getElementById('save-issue-btn').textContent = 'Update Issue';
-
-        // Update Image Preview
-        const previewContainer = document.getElementById('modal-image-preview');
-        const previewImg = document.getElementById('issue-preview-img');
-        if (issue.thumbnail && previewContainer && previewImg) {
-            previewImg.src = issue.thumbnail;
-            previewContainer.style.display = 'flex';
-        } else if (previewContainer) {
-            previewContainer.style.display = 'none';
-        }
-
-        modal.style.display = 'flex';
-    }
-
-    async focusIssue(issue) {
-        if (!issue || !issue.point) return;
-
-        console.log('[IssueManager] Focusing issue:', issue.id);
-
-        // 1. Restore Camera Viewstate (Requested Feature)
-        if (issue.viewstate) {
-            console.log('[IssueManager] Restoring camera state...');
-            this.viewer.restoreState(issue.viewstate);
-        } else {
-            // Fallback: zoom to point if no state saved
-            const target = new THREE.Vector3(issue.point.x, issue.point.y, issue.point.z);
-            this.viewer.navigation.setPivotPoint(target);
-            this.viewer.navigation.setRequestHomeView(true);
-        }
-
-        // 2. Select the clashing element if dbId exists
-        console.log(JSON.stringify(issue, null, 2));
-
-        // 2단계: 'URN 헌터' 로직 구현 (Robust Mapping)
-        const targetUrn = issue.modelUrn || issue.urn || issue.targetUrn || issue.targetModelUrn || issue.versionId || (issue.attributes && issue.attributes.urn);
-        const currentUrn = this.viewer.model ? this.viewer.model.getData().urn : null;
-
-        // 디버깅 로그
-        console.log(`[Check] Target URN: ${targetUrn}`);
-        console.log(`[Check] Current URN: ${currentUrn}`);
-
-        const issueState = typeof issue.viewstate === 'string' ? JSON.parse(issue.viewstate) : issue.viewstate;
-
-        // 예외 상황 처리: 뷰어 모델이 없을 경우(초기 상태) targetUrn과 currentUrn이 다르다고 판단하여 교체 로직 진행
-        if (!this.viewer.model) {
-            console.log("[Action] 모델 교체 여부: Yes (초기 대시보드 상태)");
-        } else {
-            console.log(`[Action] 모델 교체 여부: ${targetUrn !== currentUrn ? 'Yes' : 'No'}`);
-        }
-
-        // 실행 로직 분리 (필수)
-        if (targetUrn !== currentUrn || !this.viewer.model) {
-            console.log("모델이 다름! 모델 교체 및 UI 동기화 시작...");
-
-            if (!targetUrn) {
-                alert("이 이슈에는 연결된 모델 주소가 저장되지 않았습니다");
-                return;
-            }
-
-            // [NEW] 1. 즉각적인 상단 제목 주입 (UI 배달 사고 방지)
-            let safeName = issue.modelName || issue.fileName;
-
-            // [FALLBACK] 만약 데이터가 없다면 사이드바에서 현재 활성화된 노드 텍스트 추출
-            if (!safeName || safeName === '{3D}' || safeName === 'undefined') {
-                const activeNode = document.querySelector('.tree-item.active .text');
-                if (activeNode) {
-                    safeName = activeNode.innerText;
-                    console.log('[IssueManager] Extracted name from sidebar fallback:', safeName);
-                } else {
-                    safeName = 'Loading Model...';
-                }
-            }
-
-            console.log('[DEBUG] FocusIssue - Passing to syncUIState:', { name: safeName, itemId: issue.itemId });
-
-            const topBarName = document.getElementById('viewer-model-name');
-            if (topBarName) topBarName.innerText = safeName;
-
-            // [NEW] 2. 중앙 상태 동기화
-            if (window.syncUIState) {
-                window.syncUIState(safeName, {
-                    urn: targetUrn,
-                    itemId: issue.itemId || issue.lineageUrn,
-                    hubId: issue.hubId,
-                    projectId: issue.projectId
-                });
-            }
-
-            if (this.viewer.model) {
-                this.viewer.tearDown();
-                this.viewer.setUp(this.viewer.config);
-            }
-
-            const { getSafeUrn, loadModel } = await import('./viewer.js');
-            const safeUrn = getSafeUrn(targetUrn);
-
-            // 이벤트 동기화: 로드 완료 후 핀/카메라 복원 및 제목 최종 확정
-            this.viewer.addEventListener(Autodesk.Viewing.GEOMETRY_LOADED_EVENT, () => {
-                this.restorePins();
-                this.viewer.restoreState(issueState);
-
-                // [NEW] 3. 로드 완료 후 제목 최종 싱크 (fallback 추출 보장)
-                if (window.syncUIState) {
-                    const postLoadName = issue.modelName || issue.fileName;
-                    window.syncUIState(postLoadName, {
-                        urn: targetUrn,
-                        itemId: issue.itemId || issue.lineageUrn
-                    });
-                }
-            }, { once: true });
-
-            try {
-                await loadModel(this.viewer, safeUrn);
-
-                if (window.syncTreeHighlight) {
-                    window.syncTreeHighlight(targetUrn);
-                }
-            } catch (err) {
-                console.error("모델 로드 실패:", err);
-                alert("해당 이슈의 모델을 불러올 수 없습니다.");
-            }
-        } else {
-            console.log("모델 동일! 시점만 이동...");
-            this.viewer.restoreState(issueState);
-
-            // 동일 모델이라도 제목은 다시 한번 확인
-            if (window.syncUIState) {
-                window.syncUIState(issue.modelName || null, { urn: currentUrn, itemId: issue.itemId });
-            }
-        }
+        btn.textContent = checked > 0 ? `📄 선택 내보내기(${checked})` : '📄 전체 내보내기';
     }
 
     openPdfExportModal(issueId) {
-        const issue = this.issues.find(i => i.id === issueId);
-        if (!issue) return;
-
         const modal = document.getElementById('pdf-export-modal');
         if (!modal) return;
 
-        this.exportPayload = [issue];
-        modal.dataset.issueId = issueId;
+        // [Fix] 개별 클릭 시 해당 이슈만, 미지정(전체 버튼) 시 다중 선택 로직 반영
+        if (issueId) {
+            const issue = this.issues.find(i => i.id === issueId);
+            this.exportPayload = issue ? [issue] : [];
+        } else {
+            const checkedNodes = [...document.querySelectorAll('.issue-check:checked')];
+            if (checkedNodes.length > 0) {
+                const ids = checkedNodes.map(n => parseInt(n.dataset.id));
+                this.exportPayload = this.issues.filter(i => ids.includes(i.id));
+            } else {
+                this.exportPayload = [...this.issues];
+            }
+        }
 
         this.setupPdfModalListeners();
         this._populatePdfItemList();
         modal.style.display = 'flex';
     }
 
-    _populatePdfIssueList() {
-        const listContainer = document.getElementById('pdf-issue-list');
-        if (!listContainer) return;
-
-        if (!this.exportPayload || this.exportPayload.length === 0) {
-            listContainer.innerHTML = '<p style="font-size:12px; color:#94a3b8;">선택된 이슈가 없습니다.</p>';
-            return;
-        }
-
-        listContainer.innerHTML = this.exportPayload.map(issue => `
-            <label style="display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid #f1f5f9; cursor: pointer; font-size: 13px;">
-                <input type="checkbox" class="pdf-issue-check" data-id="${issue.id}" checked>
-                <span style="font-weight: 600; color: #6366f1; min-width: 80px;">${issue.issue_number || 'N/A'}</span>
-                <span style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1;">${issue.title}</span>
+    _populatePdfItemList() {
+        const listEl = document.getElementById('pdf-item-list');
+        if (!listEl) return;
+        listEl.innerHTML = this.exportPayload.map(i => `
+            <label class="pdf-item-label" style="display:flex;align-items:center;gap:8px;padding:5px;cursor:pointer;">
+                <input type="checkbox" class="pdf-issue-check" data-id="${i.id}" checked>
+                <span class="v-num">#${i.id.toString().slice(-4)}</span>
+                <span style="flex:1;overflow:hidden;text-overflow:ellipsis;">${i.title}</span>
             </label>
         `).join('');
-
-        // Reset Field selectors to checked
-        ['sf-no', 'sf-structure', 'sf-work-type', 'sf-description', 'sf-resolution', 'sf-image'].forEach(id => {
-            const el = document.getElementById(id);
-            if (el) el.checked = true;
-        });
-
-        const allBtn = document.getElementById('pdf-all-issues-btn');
-        if (allBtn) allBtn.textContent = '전체 해제';
     }
 
-    async exportToPdf(issuesArray, sf = {}) {
-        const issuesList = Array.isArray(issuesArray) ? issuesArray : [issuesArray];
-        const title = document.getElementById('pdf-export-title')?.value || '이슈 해결 결과 보고서';
-        const logoFile = document.getElementById('pdf-export-logo')?.files?.[0];
+    setupPdfModalListeners() {
+        const modal = document.getElementById('pdf-export-modal');
+        if (!modal || modal.dataset.listenersBound) return;
+        modal.dataset.listenersBound = '1';
+        document.getElementById('close-pdf-modal').onclick = () => modal.style.display = 'none';
+        document.getElementById('cancel-pdf-btn').onclick = () => modal.style.display = 'none';
 
-        const logoBase64 = logoFile ? await new Promise((resolve) => {
-            const reader = new FileReader();
-            reader.onload = (e) => resolve(e.target.result);
-            reader.readAsDataURL(logoFile);
-        }) : '';
+        document.getElementById('run-pdf-export-btn').onclick = async () => {
+            const checkedIds = [...document.querySelectorAll('.pdf-issue-check:checked')].map(el => parseInt(el.dataset.id));
+            let selectedIssues = this.issues.filter(i => checkedIds.includes(i.id)).map(i => ({...i}));
+            if (selectedIssues.length === 0) return alert('항목을 선택해주세요.');
 
-        // [Enrichment] 속성명 정규화
-        const enrichedIssues = issuesList.map(issue => {
-            const sName = (issue.structure_name || issue.structureName || issue.structure || '-').toString().trim();
-            const wType = (issue.work_type || issue.workType || '-').toString().trim();
-            return {
-                ...issue,
-                structure_name: (sName === 'null' || !sName) ? '-' : sName,
-                work_type: (wType === 'null' || !wType) ? '-' : wType
+            const convertUrlToBase64 = async (url) => {
+                if (!url || url.startsWith('data:image')) return url;
+                try {
+                    const res = await fetch(url);
+                    const blob = await res.blob();
+                    return new Promise(resolve => {
+                        const reader = new FileReader();
+                        reader.onloadend = () => resolve(reader.result);
+                        reader.onerror = () => resolve(url);
+                        reader.readAsDataURL(blob);
+                    });
+                } catch (e) {
+                    console.error('[PDF-DEBUG] Base64 변환 실패:', e);
+                    return url;
+                }
             };
-        });
 
-        // ── [Reset 2] Data Payload Hard-Filter ───────────────────────────
-        const targetStructure = this.lastTargetStructure || null;
-        const targetWorkType = this.lastTargetWorkType || null; // [New] 공종 필터 추가
-        const targetStatus = this.lastTargetStatus || null;
+            // [WYSIWYG 강제 추출 로직: 백엔드 엔진 전송 직전 DOM 기반 직접 추출 및 Base64 변환]
+            for (let i = 0; i < selectedIssues.length; i++) {
+                let issue = selectedIssues[i];
+                let domDesc = null;
+                let domResDesc = null;
+                let domThumb = null;
+                let domAfterThumb = null;
 
-        // [Harness-Sync] 하네스에서 강제 주입된 필터링 데이터가 있으면 최우선 사용 (물리적 제거)
-        let finalIssues = this.forcePayloadIssues || enrichedIssues;
+                // 1. 현재 열려있는 이슈 팝업창(모달)에서 추출 (가장 최우선 DOM 타겟팅)
+                const modal = document.getElementById('issue-modal');
+                if (modal && modal.style.display !== 'none' && modal.dataset.editId == issue.id) {
+                    const descEl = document.getElementById('issue-desc');
+                    if (descEl) domDesc = descEl.value || descEl.innerText;
 
-        if (!this.forcePayloadIssues && (targetStructure || targetWorkType || targetStatus)) {
-            console.log(`[Nuclear-Reset] Hard-Filter 적용: 구조물="${targetStructure}", 공종="${targetWorkType}", 상태="${targetStatus}"`);
-            finalIssues = enrichedIssues.filter(item => {
-                let match = true;
-                if (targetStructure && !item.structure_name.includes(targetStructure)) match = false;
-                if (targetWorkType && !item.work_type.includes(targetWorkType)) match = false;
-                if (targetStatus && !item.status?.toLowerCase().includes(targetStatus.toLowerCase())) match = false;
-                return match;
-            });
-            console.log(`[Nuclear-Reset] 필터링 결과: ${enrichedIssues.length}개 -> ${finalIssues.length}개`);
-        }
+                    const resDescEl = document.getElementById('issue-resolution-desc');
+                    if (resDescEl) domResDesc = resDescEl.value || resDescEl.innerText;
 
-        // 초기화
-        this.lastTargetStructure = null;
-        this.lastTargetWorkType = null;
-        this.lastTargetStatus = null;
-        this.forcePayloadIssues = null;
+                    const thumbEl = document.getElementById('issue-preview-img');
+                    if (thumbEl && thumbEl.src && !thumbEl.src.endsWith(window.location.host + '/')) domThumb = thumbEl.src;
 
-        // [Guardrail] 필터링 결과 유실 체크
-        if (finalIssues.length === 0) {
-            alert(`[오류] 해당 구조물(${targetStructure})의 데이터가 필터링 과정에서 유실되었습니다.`);
-            return;
-        }
+                    const afterThumbEl = document.getElementById('issue-after-preview-img');
+                    if (afterThumbEl && afterThumbEl.src && !afterThumbEl.src.endsWith(window.location.host + '/')) domAfterThumb = afterThumbEl.src;
+                } 
+                // 2. 모달이 없다면 리스트 DOM 요소 직접 타겟팅
+                else {
+                    const itemEl = document.querySelector(`.issue-item[data-id="${issue.id}"]`);
+                    if (itemEl) {
+                        const itemDesc = itemEl.querySelector('.issue-item-desc');
+                        if (itemDesc) domDesc = itemDesc.innerText;
+                        
+                        const itemThumb = itemEl.querySelector('.issue-thumbnail');
+                        if (itemThumb && itemThumb.src && !itemThumb.src.endsWith(window.location.host + '/')) domThumb = itemThumb.src;
+                    }
+                }
 
-        const payload = {
-            title,
-            logoBase64,
-            issues: finalIssues,
-            sf: sf,
-            issuesCount: finalIssues.length
-        };
+                // 3. 변수 스코프 문제 방지를 위한 하드코딩 대체 로직
+                const finalDescription = domDesc || issue.description || '수정사항 내용 없음';
+                const finalResolution = domResDesc || issue.resolutionDesc || '수정사항 내용 없음';
+                
+                let pdfImageSrc = domThumb || issue.thumbnail || '';
+                if (pdfImageSrc && !pdfImageSrc.startsWith('data:image')) {
+                    pdfImageSrc = await convertUrlToBase64(pdfImageSrc);
+                }
 
-        // ── [Audit Log] 최종 데이터 출력 ────────────────────────────────
-        console.log('--- [PDF EXPORT DATA AUDIT] ---');
-        console.log(`1. Target: ${targetStructure || '전체'}`);
-        console.log(`2. Count: ${finalIssues.length}`);
-        console.table(finalIssues.map(i => ({
-            id: i.id,
-            title: i.title,
-            struct: i.structure_name,
-            work: i.work_type
-        })));
-        console.log('--- [END AUDIT] ---');
+                let pdfAfterImageSrc = domAfterThumb || issue.afterThumbnail || '';
+                if (pdfAfterImageSrc && !pdfAfterImageSrc.startsWith('data:image')) {
+                    pdfAfterImageSrc = await convertUrlToBase64(pdfAfterImageSrc);
+                }
 
-        try {
-            const resp = await fetch('/api/issues/export-pdf', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
-            });
+                // 4. 엔진 전송 직전 [PDF-DEBUG] 로그 강제 삽입
+                console.log('[PDF-DEBUG] 최종 주입 데이터:', { 
+                    issueId: issue.id,
+                    finalDescription, 
+                    finalResolution,
+                    pdfImageSrc: pdfImageSrc ? pdfImageSrc.substring(0, 50) + '...' : null,
+                    pdfAfterImageSrc: pdfAfterImageSrc ? pdfAfterImageSrc.substring(0, 50) + '...' : null
+                });
 
-            if (!resp.ok) {
-                const err = await resp.json();
-                alert('PDF 생성 실패: ' + (err.details || err.error));
-                return;
+                selectedIssues[i] = {
+                    ...issue,
+                    description: finalDescription,
+                    resolutionDesc: finalResolution,
+                    thumbnail: pdfImageSrc,
+                    afterThumbnail: pdfAfterImageSrc
+                };
             }
 
+            const sf = {
+                no: document.getElementById('pdf-field-no')?.checked,
+                structure: document.getElementById('pdf-field-structure')?.checked,
+                work_type: document.getElementById('pdf-field-worktype')?.checked,
+                description: document.getElementById('pdf-field-description')?.checked,
+                resolution: document.getElementById('pdf-field-resolution')?.checked,
+                screenshot: document.getElementById('pdf-field-images')?.checked
+            };
+            await this.exportToPdf(selectedIssues, sf);
+            modal.style.display = 'none';
+        };
+    }
+
+    async focusIssue(issue) {
+        if (!issue) return;
+        const state = typeof issue.viewstate === 'string' ? JSON.parse(issue.viewstate) : issue.viewstate;
+        this.viewer.restoreState(state);
+    }
+
+    async deleteIssue(id) {
+        if (!confirm('정말 삭제하시겠습니까?')) return;
+        this.issues = this.issues.filter(i => i.id !== id);
+        await this.saveIssues();
+        this.restorePins();
+
+        try {
+            await fetch(`/api/issues/${id}`, { method: 'DELETE' });
+        } catch (err) {
+            console.error('[IssueManager] Server delete failed:', err);
+        }
+    }
+
+    showEditModal(id) {
+        const issue = this.issues.find(i => i.id === id);
+        if (!issue) return;
+        const modal = document.getElementById('issue-modal');
+        modal.dataset.mode = 'edit';
+        modal.dataset.editId = id;
+        document.getElementById('issue-title').value = issue.title;
+        document.getElementById('issue-desc').value = issue.description;
+        
+        // 동적 Assignee 드롭다운 바인딩 및 선택 처리
+        this.populateAssigneeDropdown(issue.assignee);
+        
+        document.getElementById('issue-status').value = issue.status;
+        
+        // [Fix] 구조물 및 공종 데이터 바인딩 누락 수정 (Load 시 복구)
+        const structureInput = document.getElementById('issue-structure');
+        if (structureInput) structureInput.value = issue.structureName || '-';
+        const workTypeInput = document.getElementById('issue-work-type');
+        if (workTypeInput) workTypeInput.value = issue.workType || '-';
+
+        // [Fix] Edit 모달 오픈 시 preview-img 바인딩 누락 버그 해결
+        const previewImg = document.getElementById('issue-preview-img');
+        const previewWrap = document.getElementById('modal-image-preview');
+        if (previewImg && previewWrap) {
+            if (issue.thumbnail) {
+                previewImg.src = issue.thumbnail;
+                previewWrap.style.display = 'flex';
+            } else {
+                previewImg.src = '';
+                previewWrap.style.display = 'none';
+            }
+        }
+
+        // [Fix] 추가적으로 해결(Closed) 상태일 때 AfterThumbnail과 ResolutionDesc도 바인딩
+        const resDescInput = document.getElementById('issue-resolution-desc');
+        const resSection = document.getElementById('issue-resolution-section');
+        const afterPreviewImg = document.getElementById('issue-after-preview-img');
+        const afterPreviewWrap = document.getElementById('modal-after-image-preview');
+
+        if (resDescInput) resDescInput.value = issue.resolutionDesc || '';
+        
+        if (issue.status === 'Closed') {
+            if (resSection) resSection.style.display = 'block';
+            if (afterPreviewImg && afterPreviewWrap) {
+                if (issue.afterThumbnail) {
+                    afterPreviewImg.src = issue.afterThumbnail;
+                    afterPreviewWrap.style.display = 'flex';
+                } else {
+                    afterPreviewImg.src = '';
+                    afterPreviewWrap.style.display = 'none';
+                }
+            }
+        } else {
+            if (resSection) resSection.style.display = 'none';
+            if (afterPreviewImg && afterPreviewWrap) {
+                afterPreviewImg.src = '';
+                afterPreviewWrap.style.display = 'none';
+            }
+        }
+
+        modal.style.display = 'flex';
+
+        // [Safety UI Injection] 작성 시간 독립 주입 (Non-blocking)
+        setTimeout(() => safelyInjectIssueTime(issue), 100);
+    }
+
+    async exportToPdf(issues, sf) {
+        // 9. PDF creation configuration options reinforcement
+        const pdfOptions = {
+            useCORS: true,
+            allowTaint: true,
+            logging: true,
+            scale: 2,
+            imageTimeout: 0,
+            onclone: function(clonedDoc) {
+                const imgs = clonedDoc.getElementsByTagName('img');
+                for(let i=0; i<imgs.length; i++) {
+                    imgs[i].style.setProperty('display', 'block', 'important');
+                    imgs[i].style.setProperty('visibility', 'visible', 'important');
+                }
+            }
+        };
+        console.log("pdfOptions initialized for general report:", pdfOptions);
+
+        const toBase64 = window.imageToBase64 || (url => Promise.resolve(url));
+        
+        // Convert thumbnails and afterThumbnails to Base64 to ensure they render correctly in server-side Puppeteer PDF
+        const processedIssues = await Promise.all(issues.map(async (issue) => {
+            const updated = { ...issue };
+            if (updated.thumbnail) {
+                updated.thumbnail = await toBase64(updated.thumbnail);
+            }
+            if (updated.afterThumbnail) {
+                updated.afterThumbnail = await toBase64(updated.afterThumbnail);
+            }
+            return updated;
+        }));
+
+        const payload = { title: 'Report', issues: processedIssues, sf };
+        const resp = await fetch('/api/issues/export-pdf', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        if (resp.ok) {
             const blob = await resp.blob();
             const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = `issue_report_${Date.now()}.pdf`;
-            document.body.appendChild(a);
-            a.click();
-            URL.revokeObjectURL(url);
-            document.body.removeChild(a);
-        } catch (err) {
-            console.error('[IssueManager] PDF export failed:', err);
-            alert('PDF 내보내기 중 오류가 발생했습니다: ' + err.message);
+            const a = document.createElement('a'); a.href = url; a.download = `report_${Date.now()}.pdf`; a.click();
         }
+    }
+}
+
+// 날짜 포맷팅을 위한 헬퍼 함수
+function formatIssueDate(dateObj) {
+    const year = dateObj.getFullYear();
+    const month = String(dateObj.getMonth() + 1).padStart(2, '0');
+    const day = String(dateObj.getDate()).padStart(2, '0');
+    const hours = String(dateObj.getHours()).padStart(2, '0');
+    const minutes = String(dateObj.getMinutes()).padStart(2, '0');
+    return `${year}-${month}-${day} ${hours}:${minutes}`;
+}
+
+/**
+ * [Non-Destructive] 이슈 작성/수정 시 UI에 상황별(Context-Aware) 작성 시간을 안전하게 주입
+ */
+function safelyInjectIssueTime(existingIssueData = null) {
+    try {
+        let timeString = "";
+
+        // 🌟 분기 1: 기존 이슈 데이터가 있고, 생성 시간(createdAt) 필드가 존재할 때 (과거 시간 고정)
+        if (existingIssueData && existingIssueData.createdAt) {
+            const originalDate = new Date(existingIssueData.createdAt);
+            timeString = `작성 시간: ${formatIssueDate(originalDate)}`;
+        } 
+        // 🌟 분기 2: 완전 새 이슈를 작성하는 팝업일 때 (현재 팝업 여는 순간의 시간)
+        else {
+            timeString = `작성 시간: ${formatIssueDate(new Date())}`;
+        }
+
+        // DOM 요소 렌더링 및 갱신
+        const existingTimeEl = document.getElementById('safe-issue-time');
+        if (existingTimeEl) {
+            existingTimeEl.innerText = timeString;
+        } else {
+            const modal = document.getElementById('issue-modal');
+            if (!modal) return;
+            const actionButtons = modal.querySelector('.modal-footer, .issue-modal-actions, .button-group'); 
+            if (!actionButtons) return;
+
+            const timeHtml = `<div id="safe-issue-time" style="text-align: right; font-size: 12px; color: #888; padding: 5px 15px 10px 0;">${timeString}</div>`;
+            actionButtons.insertAdjacentHTML('beforebegin', timeHtml);
+        }
+    } catch (error) {
+        console.warn("[UI 주입 무시됨] 코어 기능은 정상 작동합니다.", error);
     }
 }

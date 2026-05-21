@@ -903,7 +903,6 @@ body {
     /* Force extra space away from scrollbars/sidebar edges */
 }
 
-
 .top-bar-title {
     font-size: 0.95rem;
     font-weight: 600;
@@ -1038,6 +1037,10 @@ body {
     color: var(--text-muted);
     font-size: 0.8rem;
     font-style: italic;
+    max-width: 400px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .top-bar-btn {
@@ -1285,7 +1288,7 @@ body {
 .sidebar-right {
     width: var(--sidebar-r-w);
     flex-shrink: 0;
-    background: var(--bg-secondary);
+    background: #ffffff; /* Brightened from var(--bg-secondary) */
     border-left: 1px solid var(--border-primary);
     display: flex;
     flex-direction: column;
@@ -1297,6 +1300,8 @@ body {
     flex-direction: column;
     height: 100%;
     overflow: hidden;
+    background: #ffffff;
+    color: #334155; /* Dark text for light background */
 }
 
 /* AI Header */
@@ -1305,9 +1310,9 @@ body {
     align-items: center;
     gap: 12px;
     padding: 16px;
-    border-bottom: 1px solid var(--border-primary);
+    border-bottom: 1px solid #e2e8f0;
     flex-shrink: 0;
-    background: var(--gradient-card);
+    background: #f8fafc; /* Light gray background for header */
 }
 
 .ai-icon {
@@ -1340,11 +1345,12 @@ body {
 /* Context Panel */
 .context-panel {
     flex-shrink: 0;
-    border-bottom: 1px solid var(--border-primary);
+    border-bottom: 1px solid #e2e8f0;
     max-height: 140px;
     overflow: hidden;
     display: flex;
     flex-direction: column;
+    background: #f1f5f9;
 }
 
 .context-header {
@@ -1352,7 +1358,7 @@ body {
     align-items: center;
     justify-content: space-between;
     padding: 8px 14px;
-    background: rgba(16, 185, 129, 0.04);
+    background: rgba(16, 185, 129, 0.08);
 }
 
 .context-label {
@@ -1415,7 +1421,7 @@ body {
 .chat-welcome {
     text-align: center;
     padding: 20px;
-    color: var(--text-secondary);
+    color: #64748b;
     font-size: 0.83rem;
     line-height: 1.7;
 }
@@ -1456,9 +1462,9 @@ body {
 
 .chat-bubble.assistant {
     align-self: flex-start;
-    background: var(--bg-card);
-    border: 1px solid var(--border-primary);
-    color: var(--text-primary);
+    background: #f1f5f9;
+    border: 1px solid #e2e8f0;
+    color: #1e293b;
     border-bottom-left-radius: 4px;
 }
 
@@ -1496,8 +1502,8 @@ body {
     display: flex;
     gap: 4px;
     padding: 12px 16px;
-    background: var(--bg-card);
-    border: 1px solid var(--border-primary);
+    background: #f1f5f9;
+    border: 1px solid #e2e8f0;
     border-radius: var(--radius-lg);
     border-bottom-left-radius: 4px;
 }
@@ -1565,9 +1571,9 @@ body {
 /* Chat Input */
 .chat-input-area {
     padding: 10px 12px 12px;
-    border-top: 1px solid var(--border-primary);
+    border-top: 1px solid #e2e8f0;
     flex-shrink: 0;
-    background: var(--bg-secondary);
+    background: #f8fafc;
     position: relative;
     z-index: 200000 !important;
     /* 초고순위 레이어 할당 */
@@ -1579,8 +1585,8 @@ body {
     display: flex;
     align-items: flex-end;
     gap: 8px;
-    background: var(--bg-card);
-    border: 1px solid var(--border-primary);
+    background: #ffffff;
+    border: 1px solid #cbd5e1;
     border-radius: var(--radius-lg);
     padding: 8px 8px 8px 14px;
     transition: border-color var(--duration);
@@ -1596,7 +1602,7 @@ body {
     background: none;
     border: none;
     outline: none;
-    color: var(--text-primary);
+    color: #1e293b;
     font-size: 0.85rem;
     resize: none;
     font-family: inherit;
@@ -1987,7 +1993,7 @@ body {
 .slot-value {
     font-size: 0.85rem;
     font-weight: 500;
-    color: var(--text-primary);
+    color: #fff;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -2002,9 +2008,55 @@ body {
 
 .compare-actions {
     display: flex;
-    gap: 8px;
+    align-items: center;
+    gap: 12px;
     border-left: 1px solid var(--border-primary);
     padding-left: 20px;
+}
+
+.view-mode-toggle {
+    display: flex;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid var(--border-primary);
+    border-radius: var(--radius-md);
+    overflow: visible; /* 아이콘 잘림 방지 */
+    position: relative;
+    z-index: 100;
+    pointer-events: auto;
+}
+
+.view-mode-toggle .toggle-btn {
+    background: transparent;
+    border: none;
+    width: 38px;
+    height: 38px;
+    padding: 0; /* 중앙 정렬을 위해 패딩 제거 또는 최소화 */
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: all 0.2s ease;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+}
+
+.view-mode-toggle .toggle-btn i {
+    font-size: 1.2rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    height: 100%;
+}
+
+.view-mode-toggle .toggle-btn:hover {
+    color: var(--text-primary);
+    background: rgba(255, 255, 255, 0.1);
+}
+
+.view-mode-toggle .toggle-btn.active {
+    background: var(--accent-blue);
+    color: #fff;
 }
 
 .btn-diff-run {
@@ -2174,7 +2226,7 @@ body {
 
 .slot-value {
     font-size: 13px;
-    color: var(--text-primary);
+    color: #fff;
     font-weight: 500;
     white-space: nowrap;
     overflow: hidden;
@@ -3310,26 +3362,29 @@ input:checked+.slider:before {
     border-right: 2px solid var(--accent-purple);
 }
 
-/* Vertical Resize Handle */
-.diff-v-resizer-handle {
-    height: 5px;
-    background: #444;
-    /* Grey line */
+/* [NEW] Horizontal Panel Resizer (Replaces .diff-v-resizer-handle) */
+.resizer-horizontal {
+    height: 8px;
+    background: #2a2d34;
     cursor: ns-resize;
     position: relative;
     z-index: 100;
-    transition: background 0.2s;
-    margin: 0;
+    transition: all 0.2s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
 }
 
-.diff-v-resizer-handle:hover,
-.diff-v-resizer-handle.dragging {
-    background: var(--accent-purple);
+.resizer-horizontal:hover,
+.resizer-horizontal.dragging {
+    background: var(--accent-purple, #9b51e0);
 }
 
-.v-resizer-knob {
-    display: none;
-    /* Removed knob as requested a line */
+.resizer-line {
+    width: 40px;
+    height: 2px;
+    background: rgba(255, 255, 255, 0.2);
+    border-radius: 1px;
 }
 
 /* Ensure data stays within resized columns */
@@ -3657,6 +3712,7 @@ input:checked+.slider:before {
     color: #fff;
     padding: 10px;
     font-size: 13px;
+    font-family: inherit;
 }
 
 .form-row {
@@ -4522,9 +4578,9 @@ input:checked+.slider:before {
     min-height: 400px;
     /* 브라우저 최대 허용 z-index (2^31 - 1) */
     z-index: 2147483647 !important;
-    background: var(--bg-secondary) !important;
-    border: 1px solid var(--border-accent) !important;
-    box-shadow: 0 20px 50px rgba(0, 0, 0, 0.6) !important;
+    background: #ffffff !important;
+    border: 1px solid #cbd5e1 !important;
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.15) !important;
     border-radius: var(--radius-lg) !important;
     display: none;
     flex-direction: column;
@@ -5123,3 +5179,428 @@ input:checked+.slider:before {
     background: #6366f1;
     box-shadow: 0 0 8px rgba(99, 102, 241, 0.7);
 }
+/* [NEW] Overlay Mode Issue Button */
+.btn-compare-issue {
+    width: 38px;
+    height: 38px;
+    background: #e91e63;
+    color: white;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.2rem;
+    transition: all 0.2s;
+    box-shadow: 0 4px 12px rgba(233, 30, 99, 0.3);
+}
+
+.btn-compare-issue:hover {
+    transform: translateY(-2px);
+    background: #f06292;
+    box-shadow: 0 6px 16px rgba(233, 30, 99, 0.5);
+}
+
+.btn-compare-issue:active {
+    transform: scale(0.95);
+}
+
+/* [NEW] Overlay Controls Panel (Glassmorphism) */
+.overlay-controls-panel {
+    position: absolute;
+    top: 70px;
+    right: 20px;
+    width: 220px;
+    padding: 15px;
+    background: rgba(20, 22, 28, 0.85);
+    backdrop-filter: blur(12px);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 12px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+    z-index: 1001;
+    color: white;
+    font-size: 0.9rem;
+    animation: fadeInSlideIn 0.3s ease-out;
+}
+
+.ocp-header {
+    font-weight: 600;
+    margin-bottom: 12px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    color: #9b51e0;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.ocp-row {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 15px;
+}
+
+.ocp-row:last-child {
+    margin-bottom: 0;
+}
+
+.ocp-label {
+    font-size: 0.8rem;
+    color: #aaa;
+}
+
+.ocp-tools {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.ocp-btn {
+    background: rgba(255, 255, 255, 0.1);
+    border: none;
+    color: white;
+    width: 28px;
+    height: 28px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.2s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.ocp-btn:hover {
+    background: rgba(255, 255, 255, 0.2);
+    color: #9b51e0;
+}
+
+.ocp-btn.hidden {
+    color: #555;
+}
+
+.ocp-tools input[type=" range\] {
+ flex: 1;
+ height: 4px;
+ -webkit-appearance: none;
+ background: rgba(255, 255, 255, 0.2);
+ border-radius: 2px;
+ outline: none;
+}
+
+.ocp-tools input[type=\range\]::-webkit-slider-thumb {
+ -webkit-appearance: none;
+ width: 12px;
+ height: 12px;
+ background: #9b51e0;
+ border-radius: 50%;
+ cursor: pointer;
+ box-shadow: 0 0 8px rgba(155, 81, 224, 0.5);
+}
+
+@keyframes fadeInSlideIn {
+ from { opacity: 0; transform: translateY(-10px); }
+ to { opacity: 1; transform: translateY(0); }
+}
+
+
+/* 마크업 모드 활성화 시 상단 바 강제 숨김 */
+body.markup-active-mode #compare-bar {
+    display: none !important;
+    visibility: hidden !important;
+    opacity: 0 !important;
+    pointer-events: none !important;
+}
+/* ==========================================================================
+   Version Comparison Tabs & Issue Table UI
+   ========================================================================== */
+.comparison-tabs {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 15px 0 15px;
+    background-color: #1e293b; /* match diff-results-columns background if needed or typical dark theme */
+    border-bottom: 2px solid #334155;
+}
+
+.comparison-tabs .tab-buttons {
+    display: flex;
+    gap: 5px;
+}
+
+.tab-btn {
+    background-color: #334155;
+    color: #94a3b8;
+    border: none;
+    padding: 8px 16px;
+    font-size: 13px;
+    font-weight: 600;
+    border-radius: 6px 6px 0 0;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.tab-btn:hover {
+    background-color: #475569;
+    color: #f8fafc;
+}
+
+.tab-btn.active {
+    background-color: #deff9a;
+    color: #0f172a;
+    border-bottom: 2px solid #deff9a;
+    margin-bottom: -2px; /* overlap border */
+}
+
+.tab-content {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    background-color: #0f172a; /* match dark theme */
+}
+
+.tab-pane {
+    display: none;
+    flex: 1;
+    flex-direction: column;
+    min-height: 0;
+    height: 100%;
+}
+
+.tab-pane.active {
+    display: flex;
+}
+
+/* Version Comparison Issue Table */
+.diff-issue-container {
+    padding: 15px;
+    overflow-y: auto;
+    height: 100%;
+}
+
+.diff-issue-table {
+    width: 100%;
+    border-collapse: collapse;
+    background-color: #1e293b;
+    color: #e2e8f0;
+    font-size: 13px;
+}
+
+.diff-issue-table th, .diff-issue-table td {
+    padding: 10px 12px;
+    text-align: left;
+    border-bottom: 1px solid #334155;
+}
+
+.diff-issue-table th {
+    background-color: #0f172a;
+    color: #94a3b8;
+    font-weight: 600;
+    position: sticky;
+    top: 0;
+}
+
+.diff-issue-table tr:hover td {
+    background-color: #334155;
+}
+
+/* Override existing styles to fit in tab layout */
+#results-tab {
+    /* If #results-tab is active, it uses display:flex. */
+}
+
+/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   버전비교 이슈 탭 — 상단 툴바, 체크박스, 필터, PDF 버튼
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+
+/* 상단 툴바 레이아웃 */
+.comp-issue-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 14px;
+    background: rgba(15, 23, 42, 0.6);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+    gap: 10px;
+    flex-shrink: 0;
+}
+
+.comp-issue-toolbar-left {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.comp-issue-toolbar-right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+/* 이슈 건수 배지 */
+.comp-issue-count-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    background: rgba(99, 102, 241, 0.12);
+    border: 1px solid rgba(99, 102, 241, 0.25);
+    border-radius: 12px;
+    font-size: 0.78rem;
+    color: #a5b4fc;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+}
+
+/* 툴바 공통 버튼 */
+.comp-toolbar-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 14px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.05);
+    color: #cbd5e1;
+    font-size: 0.82rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    white-space: nowrap;
+}
+
+.comp-toolbar-btn:hover {
+    background: rgba(99, 102, 241, 0.15);
+    border-color: rgba(99, 102, 241, 0.4);
+    color: #a5b4fc;
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(99, 102, 241, 0.15);
+}
+
+/* PDF 버튼 — 강조 색상 */
+#export-comp-pdf-btn {
+    border-color: rgba(239, 68, 68, 0.35);
+    color: #fca5a5;
+}
+
+#export-comp-pdf-btn:hover {
+    background: rgba(239, 68, 68, 0.12);
+    border-color: rgba(239, 68, 68, 0.55);
+    color: #ef4444;
+    box-shadow: 0 4px 12px rgba(239, 68, 68, 0.18);
+}
+
+/* 체크박스 컬럼 */
+.col-check {
+    width: 40px !important;
+    text-align: center !important;
+    padding: 8px 4px !important;
+}
+
+#check-all-comp-issues,
+.sub-check-comp-issue {
+    width: 15px;
+    height: 15px;
+    cursor: pointer;
+    accent-color: #6366f1;
+    border-radius: 3px;
+}
+
+/* 헤더 th 내부 드롭다운 필터 select */
+.col-filter-select, 
+#filter-col-structure {
+    display: block;
+    width: 100% !important;
+    min-width: 0 !important;       /* 🚨 브라우저 기본 최소 너비 제한 강제 해제 */
+    margin-top: 5px;
+    box-sizing: border-box !important;
+    padding: 3px 6px;
+    background: var(--bg-secondary, #111318);
+    border: 1px solid rgba(99, 102, 241, 0.3);
+    border-radius: 5px;
+    color: var(--text-primary, #f1f5f9);
+    font-size: 0.73rem;
+    font-family: inherit;
+    cursor: pointer;
+    outline: none;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
+    overflow: hidden !important;   /* 열이 작아지면 내부 글자 숨김 */
+    text-overflow: ellipsis !important; /* 글자가 넘치면 ... 처리 (브라우저 지원 시) */
+}
+
+.col-filter-select:hover,
+.col-filter-select:focus {
+    border-color: #6366f1;
+    box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.18);
+}
+
+/* th 레이블이 위에, 드롭다운이 아래에 오도록 세로 배치 */
+#diff-issue-table thead .header-label-row th {
+    vertical-align: top;
+}
+
+/* tr 선택 시 하이라이트 (체크박스 활성화) */
+#diff-issue-list tr.row-selected td {
+    background: rgba(99, 102, 241, 0.08) !important;
+}
+
+/* 필터로 숨겨진 행 */
+#diff-issue-list tr.row-hidden {
+    display: none !important;
+}
+
+/* comp-issue 툴바 내 pdf-dropdown-wrap 위치 보정 (우측 정렬) */
+#comp-pdf-dropdown-wrap .pdf-dropdown-menu {
+    right: 0;
+    left: auto;
+    min-width: 220px;
+}
+
+/* 버전비교 이슈 탭 내부 스크롤 설정 */
+#issues-tab {
+    width: 100% !important;
+    height: 100%;
+    overflow: hidden;
+}
+
+/* 열 너비 조절 기능 보강을 위한 테이블 고정 레이아웃 및 최소 너비 해제 */
+#issues-tab table th select {
+    -webkit-appearance: none !important; /* 🚨 크롬, 사파리 등 네이티브 화살표 디자인 강제 제거 */
+    -moz-appearance: none !important;    /* 파이어폭스 화살표 강제 제거 */
+    appearance: none !important;         /* 표준 화살표 강제 제거 */
+    
+    width: 100% !important;
+    max-width: 100% !important;
+    min-width: 0 !important;
+    box-sizing: border-box !important;
+    
+    /* 화살표가 사라져서 답답할 수 있으니 우측에 가벼운 텍스트 패딩만 부여 */
+    padding-right: 10px !important; 
+    text-overflow: ellipsis !important;
+    white-space: nowrap !important;
+}
+
+#issues-tab table th {
+    position: relative !important;
+    overflow: hidden !important;       /* 🚨 핵심: 너비가 줄어들 때 select가 삐져나오면 가차없이 잘라버림 */
+    text-overflow: ellipsis !important;
+    white-space: nowrap !important;
+    box-sizing: border-box !important;
+    min-width: 0 !important;
+    max-width: 100% !important;
+}
+
+#issues-tab table {
+    table-layout: fixed !important;   /* 열 너비 조절이 정상 작동하기 위한 필수 조건 */
+    width: 100% !important;
+}
+
+#cancel-comp-issue-btn, #save-comp-issue-btn {
+    pointer-events: auto !important;
+    cursor: pointer !important;
+    z-index: 99999 !important;
+}
+
+
+

@@ -31,15 +31,23 @@ router.post('/summarize', asyncHandler(async (req, res) => {
     res.json({ summary, timestamp: new Date().toISOString() });
 }));
 
-// ── POST /api/ai/chat ──────────────────────────────────────────
-router.post('/chat', asyncHandler(async (req, res) => {
-    const { messages, systemContext } = req.body || {};
-    if (!Array.isArray(messages) || messages.length === 0) {
-        throw new AppError('messages array is required', 400, 'VALIDATION_ERROR');
+// ── POST /api/ai/chat  → Multi-turn conversation
+router.post('/chat', async (req, res, next) => {
+    try {
+        // 🚨 [Back] 프론트에서 받은 전체 body 디버깅
+        console.log("🚨 [Back] 프론트에서 받은 전체 body:", JSON.stringify(req.body, null, 2));
+
+        const { messages, systemContext, issues } = req.body;
+        if (!messages || !messages.length) {
+            return next({ status: 400, message: 'messages array is required' });
+        }
+        const reply = await aiService.chat({ messages, systemContext, issues });
+        res.json({ reply, timestamp: new Date().toISOString() });
+    } catch (err) {
+        console.error('[AI] chat error:', err.message);
+        next({ status: 500, message: 'AI chat failed: ' + err.message });
     }
-    const reply = await aiService.chat({ messages, systemContext });
-    res.json({ reply, timestamp: new Date().toISOString() });
-}));
+});
 
 // ── GET /api/ai/provider ───────────────────────────────────────
 router.get('/provider', (req, res) => {

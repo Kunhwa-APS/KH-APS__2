@@ -69,12 +69,12 @@
         }
 
         th {
-            background-color: #d1d5db;
+            background-color: #eaecf0;
             font-weight: bold;
         }
 
         .label-cell {
-            background-color: #d1d5db;
+            background-color: #eaecf0;
             font-weight: bold;
         }
 
@@ -209,7 +209,7 @@
                 <!-- ── 간섭 내용 Row ──────────────────────────────── -->
                 {{#if ../sf.description}}
                 <tr>
-                    <td class="label-cell">간섭 내용</td>
+                    <td class="label-cell">기존 내용</td>
                     <td colspan="{{../sf.colspan}}" class="desc-cell">{{description}}</td>
                 </tr>
                 {{/if}}
@@ -217,44 +217,40 @@
                 <!-- ── 수정사항 Row ────────────────────────────────── -->
                 {{#if ../sf.resolution}}
                 <tr>
-                    <td class="label-cell">수정사항</td>
+                    <td class="label-cell">변경 내용</td>
                     <td colspan="{{../sf.colspan}}" class="desc-cell">{{resolution_description}}</td>
                 </tr>
                 {{/if}}
 
                 <!-- ── 캡쳐이미지 ──────────────────────────────────── -->
                 {{#if ../sf.screenshot}}
-                {{#if (eq status "Closed")}}
-                {{!-- CLOSED: 50/50 Before vs After via nested table --}}
+                {{#if imageTableRows}}
+                {{{imageTableRows}}}
+                {{else if isDualImage}}
+                {{!-- DUAL IMAGE: 50/50 Before vs After layout --}}
                 <tr>
-                    <td colspan="{{../sf.totalCols}}" style="padding:0;border:1px solid #777;">
-                        <table class="image-inner-table">
-                            <thead>
-                                <tr>
-                                    <th style="width:50%;">변경 전</th>
-                                    <th style="width:50%;">변경 후</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                <tr>
-                                    <td class="image-half-cell">
-                                        {{#if thumbnail}}
-                                        <img src="{{thumbnail}}" alt="Before" />
-                                        {{/if}}
-                                    </td>
-                                    <td class="image-half-cell">
-                                        {{#if after_snapshot_url}}
-                                        <img src="{{after_snapshot_url}}" alt="After" />
-                                        {{/if}}
-                                    </td>
-                                </tr>
-                            </tbody>
-                        </table>
+                    <th colspan="{{../sf.halfCols}}" style="width: 50%; background-color: #eaecf0; font-weight: bold; border: 1px solid #777;">변경 전 ({{versionA}})</th>
+                    <th colspan="{{../sf.halfCols}}" style="width: 50%; background-color: #eaecf0; font-weight: bold; border: 1px solid #777;">변경 후 ({{versionB}})</th>
+                </tr>
+                <tr>
+                    <td colspan="{{../sf.halfCols}}" style="width: 50%; height: 380px; text-align: center; vertical-align: middle; padding: 10px; border: 1px solid #777; background-color: #fff; box-sizing: border-box;">
+                        {{#if thumbnail}}
+                        <img src="{{thumbnail}}" style="max-width: 100%; max-height: 100%; object-fit: contain; display: block; margin: 0 auto;" alt="Before" />
+                        {{else}}
+                        <div style="color:#999;font-size:12px;">이미지 없음</div>
+                        {{/if}}
+                    </td>
+                    <td colspan="{{../sf.halfCols}}" style="width: 50%; height: 380px; text-align: center; vertical-align: middle; padding: 10px; border: 1px solid #777; background-color: #fff; box-sizing: border-box;">
+                        {{#if after_snapshot_url}}
+                        <img src="{{after_snapshot_url}}" style="max-width: 100%; max-height: 100%; object-fit: contain; display: block; margin: 0 auto;" alt="After" />
+                        {{else}}
+                        <div style="color:#999;font-size:12px;">이미지 없음</div>
+                        {{/if}}
                     </td>
                 </tr>
 
                 {{else}}
-                {{!-- OPEN: Single full-width image --}}
+                {{!-- SINGLE IMAGE: Single full-width image --}}
                 <tr>
                     <th colspan="{{../sf.totalCols}}">이 미 지</th>
                 </tr>
@@ -262,6 +258,8 @@
                     <td colspan="{{../sf.totalCols}}" class="image-full-cell">
                         {{#if thumbnail}}
                         <img src="{{thumbnail}}" class="centered-image" alt="Open Issue" />
+                        {{else}}
+                        <div style="color:#999;font-size:12px;">이미지 없음</div>
                         {{/if}}
                     </td>
                 </tr>

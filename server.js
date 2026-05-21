@@ -38,6 +38,7 @@ app.use(session({
     secret: config.session.secret,
     resave: false,
     saveUninitialized: false,
+    proxy: true, // Required for secure cookies behind proxy
     cookie: {
         httpOnly: true,
         sameSite: 'lax',

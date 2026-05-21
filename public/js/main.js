@@ -9,9 +9,8 @@ import { runDiff, visualizeDiff, loadVersions, exitCompareMode, showDiffList, ad
 // import { initLocalClash, closeClashPanel } from './clash-viewer.js';
 import { IssueManager } from './issue-manager.js';
 import { addCustomButtons } from './toolbar-utils.js';
-import { initMap, addProjectMarkers, flyToLocation, resizeMap } from './map.js';
 import { loadVersionsDropdown } from './version-manager.js?v=ver_20260330_1715';
-import { renderPremiumDashboard } from './dashboard-premium.js';
+
 import { explorer } from './explorer.js';
 
 const login = document.getElementById('login');
@@ -26,8 +25,7 @@ let versionA = null;
 let versionB = null;
 let _exitCompareToolbarBtn = null; // Reference to the toolbar exit button
 let issueManager = null;
-let mapInitialized = false;
-let mapApiKey = null;
+
 
 // Expose handles globally for toolbar-utils.js
 window._issueManager = null;
@@ -78,10 +76,20 @@ try {
                 const itemId = window.currentItemId;
                 const currentVersionId = window.currentVersionId;
                 console.log('[Main] GEOMETRY_LOADED - loading version dropdown with:', { hubId, projectId, itemId });
+
                 if (hubId && projectId && itemId) {
                     await loadVersionsDropdown(hubId, projectId, itemId, currentVersionId);
-                } else {
-                    console.warn('[Main] GEOMETRY_LOADED - missing context, version dropdown not populated');
+                }
+
+                // [Architecture-Change] 로딩 시점에 모델 스냅샷 선행 추출 (Pre-fetching)
+                try {
+                    console.log('[Data-Center] Starting pre-fetch snapshot for AI grounding...');
+                    const snapshot = await ContextHarness.getModelSnapshot(currentViewer);
+                    window.modelSnapshot = snapshot;
+                    console.log("[Data-Center] Snapshot created:", snapshot);
+                } catch (snapErr) {
+                    console.error('[Data-Center] Failed to create initial snapshot:', snapErr);
+                    window.modelSnapshot = {};
                 }
             });
 
@@ -104,16 +112,24 @@ try {
         // 3. Init Tree
         initTree('#tree', (node) => handleTreeSelection(node));
 
-        // 4. Project Dashboard Init
-        renderPremiumDashboard(); // New premium dashboard
-        renderProjectSelectionDashboard(); // Legacy one (hidden)
-
-
+        // 4. Logo Click Event
+        const logo = document.querySelector('.logo');
+        if (logo) {
+            logo.style.cursor = 'pointer';
+            logo.onclick = () => {
+                window.location.href = '/';
+            };
+        }
 
         // 5. UI Events
         runDiffBtn.onclick = () => handleRunDiff();
         exitCompareBtn.onclick = () => handleExitCompare();
         setupResultsUI();
+
+        // [PDF-Fix] 즉시 실행 대신 IssueManager의 초기 바인딩만 보장 (무한 재귀 방지)
+        if (window._issueManager) {
+            window._issueManager.setupBulkExportButton();
+        }
 
         // 6. Viewer Top Bar Events
         document.getElementById('viewer-back-btn').onclick = () => {
@@ -129,21 +145,7 @@ try {
     }
     login.style.visibility = 'visible';
 
-    // 7. Load Map Config
-    try {
-        const cfgResp = await fetch('/api/config/maps');
-        if (cfgResp.ok) {
-            const cfg = await cfgResp.json();
-            mapApiKey = cfg.apiKey;
-        } else {
-            console.warn('Map configuration fetch failed.');
-        }
-    } catch (err) {
-        console.warn('Could not load maps config:', err.message);
-    }
 
-    // 8. Bind Tab Events
-    setupTabs();
 
 } catch (err) {
     console.error('Initialization error:', err);
@@ -152,155 +154,7 @@ try {
 
 
 
-// ── Project Selection Dashboard Logic ──────────────────────────────────────────
-async function renderProjectSelectionDashboard() {
-    const dashboard = document.getElementById('project-selection-dashboard');
-    const projectListBody = document.getElementById('project-list-body');
-    if (!dashboard || !projectListBody) return;
 
-    // 0. Update Date
-    const dateEl = document.getElementById('dashboard-current-date');
-    if (dateEl) {
-        const now = new Date();
-        const days = ['SUNDAY', 'MONDAY', 'TUESDAY', 'WEDNESDAY', 'THURSDAY', 'FRIDAY', 'SATURDAY'];
-        const yyyy = now.getFullYear();
-        const mm = String(now.getMonth() + 1).padStart(2, '0');
-        const dd = String(now.getDate()).padStart(2, '0');
-        dateEl.textContent = `${yyyy}-${mm}-${dd} ${days[now.getDay()]}`;
-    }
-
-    try {
-        // 1. Fetch Hubs
-        const hubsResponse = await fetch('/api/hubs');
-        const hubs = await hubsResponse.json();
-
-        if (!Array.isArray(hubs) || hubs.length === 0) {
-            const errorMsg = hubs.error || '허브 정보를 찾을 수 없습니다. 로그인을 확인해주세요.';
-            projectListBody.innerHTML = `<tr><td colspan="6" class="error-state">${errorMsg}</td></tr>`;
-            return;
-        }
-
-        // 2. Fetch Projects for all Hubs in parallel
-        projectListBody.innerHTML = '<tr><td colspan="6" class="loading-state">참여 중인 프로젝트를 검색하고 있습니다...</td></tr>';
-
-        let allProjects = [];
-        const projectPromises = hubs.map(async (hub) => {
-            try {
-                const projectsResponse = await fetch(`/api/hubs/${hub.id}/projects`);
-                const projects = await projectsResponse.json();
-                return projects.map(p => ({ ...p, hubName: hub.name, hubId: hub.id }));
-            } catch (err) {
-                console.warn(`Failed to fetch projects for hub ${hub.id}:`, err);
-                return [];
-            }
-        });
-
-        const results = await Promise.all(projectPromises);
-        allProjects = results.flat();
-
-        if (allProjects.length === 0) {
-            projectListBody.innerHTML = '<tr><td colspan="6" class="error-state">참여 중인 프로젝트가 없습니다.</td></tr>';
-            return;
-        }
-
-        // 3. Sort by creation date (descending)
-        allProjects.sort((a, b) => new Date(b.created || 0) - new Date(a.created || 0));
-
-        // 4. Render Table
-        renderProjectRows(allProjects);
-
-        // 5. Search filtering
-        const searchInput = document.getElementById('project-search');
-        searchInput.oninput = (e) => {
-            const term = e.target.value.toLowerCase();
-            const filtered = allProjects.filter(p =>
-                p.name.toLowerCase().includes(term) ||
-                (p.hubName && p.hubName.toLowerCase().includes(term))
-            );
-            renderProjectRows(filtered);
-        };
-
-    } catch (err) {
-        console.error('[Dashboard] Error rendering:', err);
-        projectListBody.innerHTML = '<tr><td colspan="6" class="error-state">프로젝트 목록을 가져오는 중 오류가 발생했습니다.</td></tr>';
-    }
-}
-
-function renderProjectRows(projects) {
-    const projectListBody = document.getElementById('project-list-body');
-    projectListBody.innerHTML = '';
-
-    projects.forEach(project => {
-        const row = document.createElement('tr');
-
-        // Mock data for some fields to match the screenshot look
-        const projectNum = project.id.slice(-8).toUpperCase();
-        const createdDate = project.created ? new Date(project.created).toLocaleDateString('ko-KR', {
-            year: 'numeric', month: 'long', day: 'numeric'
-        }) : '-';
-
-        row.innerHTML = `
-            <td><div class="project-icon"><i class="fas fa-project-diagram"></i></div></td>
-            <td>
-                <div class="project-name-cell">${project.name}</div>
-                <div class="project-subtext">신축공사</div>
-            </td>
-            <td>${projectNum}</td>
-            <td>
-                <div class="access-chip">
-                    <i class="fas fa-file-alt"></i> Docs <i class="fas fa-caret-down"></i>
-                </div>
-            </td>
-            <td>${project.hubName}</td>
-            <td>${createdDate}</td>
-        `;
-
-        row.onclick = async () => {
-            console.log('[Dashboard] Project selected:', project.name);
-            const dashboard = document.getElementById('project-selection-dashboard');
-            if (dashboard) dashboard.style.display = 'none';
-
-            // Set global context
-            window.currentHubId = project.hubId;
-            window.currentProjectId = project.id;
-            localStorage.setItem('aps_last_hub_id', project.hubId);
-            localStorage.setItem('aps_last_project_id', project.id);
-
-            // [Optimization] проекта가 선택되면 뷰어 로드 전에도 즉시 이슈 분석(API Fetch) 가동
-            if (window.ContextHarness) {
-                console.log('[Dashboard] 프로젝트 선택됨. 백그라운드 이슈 수합(Aggregation) 시작');
-                window.ContextHarness.extract(null);
-            }
-
-            // Transition to Explorer mode
-            if (window.explorer) {
-                window.explorer.switchMode('explorer');
-
-                try {
-                    // [Feature] Automatically find and enter 'Project Files' folder
-                    const resp = await fetch(`/api/hubs/${project.hubId}/projects/${project.id}/contents`);
-                    if (resp.ok) {
-                        const items = await resp.json();
-                        const projectFiles = items.find(i => i.folder && i.name.toLowerCase().includes('project files'));
-                        if (projectFiles) {
-                            console.log('[Dashboard] Auto-navigating to Project Files:', projectFiles.id);
-                            window.explorer.showFolder(project.hubId, project.id, projectFiles.id, projectFiles.name);
-                            return;
-                        }
-                    }
-                } catch (err) {
-                    console.warn('[Dashboard] Failed to auto-locate Project Files, falling back to root:', err);
-                }
-
-                // Fallback to root (Top Folders)
-                window.explorer.showFolder(project.hubId, project.id, null, project.name);
-            }
-        };
-
-        projectListBody.appendChild(row);
-    });
-}
-// ──────────────────────────────────────────────────────────────────
 
 async function handleTreeSelection(node) {
     const tokens = node.id.split('|');
@@ -319,6 +173,11 @@ async function handleTreeSelection(node) {
         localStorage.setItem('aps_last_hub_id', hubId);
         localStorage.setItem('aps_last_project_id', projectId);
         localStorage.setItem('aps_last_region', region);
+    }
+
+    if (type === 'hub') {
+        console.log('[Main] Hub selected, showing projects in explorer:', tokens[1]);
+        explorer.showProjects(tokens[1], node.text);
     }
 
     if (type === 'folder') {
@@ -753,35 +612,39 @@ function setupIssueModal() {
 
 // ── AIAssistant Management (Hotfix V4 - Hard Toggle) ──────────────────
 document.addEventListener('DOMContentLoaded', () => {
-    const aiBtn = document.getElementById('ai-assistant-icon');
-    const aiContainer = document.getElementById('ai-assistant-container');
-    const closeBtn = document.getElementById('close-ai-widget');
+    try {
+        const aiBtn = document.getElementById('ai-assistant-icon');
+        const aiContainer = document.getElementById('ai-assistant-container');
+        const closeBtn = document.getElementById('close-ai-widget');
 
-    if (aiBtn && aiContainer) {
-        aiBtn.onclick = function () {
-            console.log("AI Assistant 버튼 클릭됨!"); // 로그로 확인
-            if (aiContainer.style.display === 'none' || aiContainer.style.display === '') {
-                aiContainer.style.setProperty('display', 'block', 'important');
-                aiContainer.style.opacity = '1';
-                aiContainer.style.transform = 'translateY(0) scale(1)';
+        if (aiBtn && aiContainer) {
+            aiBtn.onclick = function () {
+                console.log("AI Assistant 버튼 클릭됨!"); // 로그로 확인
+                if (aiContainer.style.display === 'none' || aiContainer.style.display === '') {
+                    aiContainer.style.setProperty('display', 'block', 'important');
+                    aiContainer.style.opacity = '1';
+                    aiContainer.style.transform = 'translateY(0) scale(1)';
 
-                // Auto-focus input
-                const chatInput = document.getElementById('chat-input');
-                if (chatInput) setTimeout(() => chatInput.focus(), 100);
-            } else {
+                    // Auto-focus input
+                    const chatInput = document.getElementById('chat-input');
+                    if (chatInput) setTimeout(() => chatInput.focus(), 100);
+                } else {
+                    aiContainer.style.setProperty('display', 'none', 'important');
+                    aiContainer.style.opacity = '0';
+                    aiContainer.style.transform = 'translateY(40px) scale(0.92)';
+                }
+            };
+        }
+
+        if (closeBtn && aiContainer) {
+            closeBtn.onclick = function () {
                 aiContainer.style.setProperty('display', 'none', 'important');
                 aiContainer.style.opacity = '0';
                 aiContainer.style.transform = 'translateY(40px) scale(0.92)';
-            }
-        };
-    }
-
-    if (closeBtn && aiContainer) {
-        closeBtn.onclick = function () {
-            aiContainer.style.setProperty('display', 'none', 'important');
-            aiContainer.style.opacity = '0';
-            aiContainer.style.transform = 'translateY(40px) scale(0.92)';
-        };
+            };
+        }
+    } catch (e) {
+        console.error("🔥 [DOMContentLoaded] AI Assistant widget binding failed:", e);
     }
 });
 
@@ -877,11 +740,11 @@ function setupTabs() {
                         alert('지도를 불러오는 중 오류가 발생했습니다: ' + err.message);
                     }
                 } else {
-                    hideAllPanels();
-                    headerMapBtn.classList.remove('active');
-                    headerDashboardBtn.classList.add('active');
-                    if (dashboardPremium) dashboardPremium.style.display = 'flex';
-                    alert('.env 파일에 VWORLD_API_KEY 설정이 필요합니다.');
+                     hideAllPanels();
+                     headerMapBtn.classList.remove('active');
+                     headerDashboardBtn.classList.add('active');
+                     if (dashboardPremium) dashboardPremium.style.display = 'flex';
+                     alert('.env 파일에 VWORLD_API_KEY 설정이 필요합니다.');
                 }
             } else {
                 setTimeout(() => resizeMap(), 100);
@@ -1011,47 +874,49 @@ const startSidebarObservation = () => {
 startSidebarObservation();
 
 // 3. Async Name Extraction Worker (Addressing Race Conditions)
-window.retryExtractName = async (context, maxRetries = 10) => {
-    console.log('[SyncWorker] Started for URN:', context.urn);
+/**
+ * [Safe-Parsing] URN 디코딩 에러 및 모델명 추출 안정화
+ */
+window.retryExtractName = async function (context = {}) {
+    const urn = typeof context === 'object' ? context.urn : context;
 
-    for (let i = 0; i < maxRetries; i++) {
-        const viewer = window._viewer || (typeof NOP_VIEWER !== 'undefined' ? NOP_VIEWER : null);
-        let foundName = null;
+    try {
+        if (!urn) return window.currentModelName || "Unknown Model";
 
-        // A. Check Viewer Metadata (Most Reliable)
-        if (viewer && viewer.model) {
-            const model = viewer.model;
-            const modelData = model.getData();
+        // [Fix] 이미 URN이 아닌 정상적인 명칭이 세션에 있다면 이를 우선 보호
+        const currentIsReadable = window.currentModelName && !window.currentModelName.startsWith('urn:');
 
-            // [Fix] getDocument().getProperty() 제거 및 최신 API 표준 반영
-            foundName = modelData.loadOptions?.bubbleNode?.name?.() ||
-                model.getDocumentNode()?.data?.name ||
-                modelData.metadata?.name;
+        // 1. URN 접두어(urn:adsk...)가 있다면 제거하고 순수 데이터 부분만 추출
+        let base64Str = String(urn).includes(':') ? String(urn).split(':').pop() : String(urn);
 
-            if (foundName && !['{3D}', 'Scene', 'undefined', 'Loading...'].includes(String(foundName).trim())) {
-                console.log(`[SyncWorker] Viewer API에서 모델명 추출 성공 (Attempt ${i + 1}):`, foundName);
-                return foundName;
-            }
+        // [Fix] vf. 등 버전 접두어 제거 시도
+        if (base64Str.startsWith('vf.')) base64Str = base64Str.substring(3);
+
+        // 2. Base64 규격에 맞게 문자 보정 (URL safe characters 대체)
+        base64Str = base64Str.replace(/-/g, '+').replace(/_/g, '/');
+
+        // 3. 패딩(=) 부족 시 자동 보정
+        while (base64Str.length % 4 !== 0) {
+            base64Str += '=';
         }
 
-        // B. Check Sidebar DOM (Active Item)
-        const activeNode = document.querySelector('.tree-item.active .text');
-        if (activeNode && activeNode.innerText && !['{3D}', 'Loading...'].includes(activeNode.innerText)) {
-            console.log(`[SyncWorker] Found in Sidebar DOM (Attempt ${i + 1}):`, activeNode.innerText);
-            return activeNode.innerText;
-        }
+        // 4. 안전하게 디코딩 시도 (escape() 추가로 유니코드 대응)
+        const rawDecoded = window.atob(base64Str);
+        const decodedUrn = decodeURIComponent(escape(rawDecoded));
+        console.log("[SyncWorker] Name resolved successfully:", decodedUrn);
 
-        // C. Check Global Map (From Sidebar Loading)
-        if (context.urn && window.urnToNameMap && window.urnToNameMap[context.urn]) {
-            console.log(`[SyncWorker] Found in Global Map (Attempt ${i + 1}):`, window.urnToNameMap[context.urn]);
-            return window.urnToNameMap[context.urn];
-        }
+        // 5. 파일명 추출 및 정제
+        const urnName = decodedUrn.split('/').pop().split('?')[0].replace(/\.svf$|\.nwd$|\.rvt$/i, '').trim();
+        if (urnName && urnName.length > 1 && !urnName.startsWith('urn:')) return urnName;
 
-        await new Promise(r => setTimeout(r, 600));
+    } catch (e) {
+        console.warn("[SyncWorker] Decoding issue:", e.message);
+        // 디코딩 실패 시, 기존 명칭이 읽을 수 있는 형식이라면 그것을 유지
+        if (window.currentModelName && !window.currentModelName.startsWith('urn:')) return window.currentModelName;
+        return urn;
     }
 
-    console.warn('[SyncWorker] Failed to resolve name after retries.');
-    return null;
+    return window.currentModelName || 'Unknown Model';
 };
 
 // 4. Central Orchestrator
@@ -1063,6 +928,15 @@ window.syncUIState = async (name, context = {}) => {
 
     const updateUI = (finalName) => {
         if (!finalName) return;
+
+        // [Safety Guard] URN 주소가 유효한 파일명을 덮어쓰지 않도록 차단
+        if (String(finalName).startsWith('urn:')) {
+            if (window.currentModelName && !window.currentModelName.startsWith('urn:')) {
+                console.log('[Sync] Blocking URN overwrite of readable name:', finalName, 'kept:', window.currentModelName);
+                return;
+            }
+        }
+
         const titleElements = ['viewer-model-name', 'model-title', 'model-name-label'];
         titleElements.forEach(id => {
             const el = document.getElementById(id);
@@ -1093,14 +967,13 @@ window.syncUIState = async (name, context = {}) => {
     const refinedName = await window.retryExtractName(context);
     if (refinedName) updateUI(refinedName);
 
-    // [Harness-Architecture] 추출된 데이터를 컨텍스트 하네스에 최종 주입
+    // [Harness-Architecture] 자동 추출 중단 (사용자 요청 시에만 수행하도록 변경)
+    /*
     if (window.ContextHarness) {
-        const viewer = window._viewer || (typeof NOP_VIEWER !== 'undefined' ? NOP_VIEWER : null);
-        if (viewer && viewer.model) {
-            console.log('[Main] SyncUIState -> ContextHarness.extract 트리거');
-            window.ContextHarness.extract(viewer);
-        }
+        ...
     }
+    */
+    console.log('[Main] syncUIState finished. ContextHarness auto-extract bypassed.');
 };
 
 

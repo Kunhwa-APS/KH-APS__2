@@ -1,8 +1,5 @@
 /**
- * Issues Routes — 이슈 보고서 PDF 내보내기
- *
- * POST /api/issues/export-pdf
- *   body: { title, logoBase64, issues[] | single, selectedFields / sf }
+ * Issues Routes — 이슈 보고서 PDF 내보내기 및 CRUD
  */
 'use strict';
 
@@ -25,78 +22,140 @@ const router = express.Router();
 // Handlebars 헬퍼
 handlebars.registerHelper('eq', (a, b) => a === b);
 
-// 템플릿 캐시 (파일 변경시에도 서버 재시작하면 반영)
-let compiledTemplate = null;
-function getTemplate() {
-    if (compiledTemplate) return compiledTemplate;
-    const templatePath = path.join(__dirname, '..', 'views', 'issue-report.hbs');
-    const src = fs.readFileSync(templatePath, 'utf8');
-    compiledTemplate = handlebars.compile(src);
-    return compiledTemplate;
-}
+// GET: Fetch all issues
+router.get('/api/issues', (req, res) => {
+    try {
+        const dataPath = path.join(__dirname, '..', 'data', 'issues.json');
+        if (!fs.existsSync(dataPath)) {
+            return res.json([]);
+        }
+        const data = fs.readFileSync(dataPath, 'utf8');
+        res.json(JSON.parse(data || '[]'));
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to read issues' });
+    }
+});
 
-// 필드 표시 플래그 정규화 (문자열 "false" 도 false로)
-function normalizeFieldFlags(raw) {
-    const toBool = (v) => v !== false && String(v) !== 'false';
-    const sf = {
-        no: toBool(raw.no),
-        structure: toBool(raw.structure),
-        work_type: toBool(raw.work_type),
-        description: toBool(raw.description),
-        resolution: toBool(raw.resolution),
-        screenshot: toBool(raw.screenshot),
-    };
-    sf.hasMetaRow = sf.no || sf.structure || sf.work_type;
+// POST: Add or Update issue
+router.post('/api/issues', (req, res) => {
+    try {
+        const dataPath = path.join(__dirname, '..', 'data', 'issues.json');
+        const issues = fs.existsSync(dataPath) ? JSON.parse(fs.readFileSync(dataPath, 'utf8') || '[]') : [];
 
-    let cols = 0;
-    if (sf.no) cols += 2;
-    if (sf.structure) cols += 2;
-    if (sf.work_type) cols += 2;
-    sf.colspan = Math.max(1, cols - 1);
-    sf.totalCols = Math.max(1, cols);
-    sf.halfCols = Math.max(1, Math.floor(cols / 2));
-    return sf;
-}
+        const newIssue = req.body;
+        const index = issues.findIndex(i => i.id === newIssue.id);
 
-function mapIssue(raw, idx) {
-    const s = (v) => (v ?? '').toString().trim();
-    return {
-        issueId: s(raw.issue_number || raw.issueNumber || raw.dbId || raw.id || idx + 1),
-        status: raw.status || 'Open',
-        pdf_structure: s(raw.structure_name || raw.structureName || raw.structure) || '-',
-        pdf_work_type: s(raw.work_type || raw.workType) || '-',
-        description: raw.description || '',
-        resolution_description: raw.resolution_description || '',
-        thumbnail: raw.thumbnail || '',
-        after_snapshot_url: raw.after_snapshot_url || '',
-    };
-}
+        if (index !== -1) {
+            issues[index] = { ...issues[index], ...newIssue, updatedAt: new Date().toISOString() };
+        } else {
+            issues.push({ ...newIssue, createdAt: new Date().toISOString() });
+        }
+
+        fs.writeFileSync(dataPath, JSON.stringify(issues, null, 2), 'utf8');
+        res.status(201).json(newIssue);
+    } catch (err) {
+        console.error('[Issues API] Save error:', err);
+        res.status(500).json({ error: 'Failed to save issue' });
+    }
+});
+
+// DELETE: Remove issue
+router.delete('/api/issues/:id', (req, res) => {
+    try {
+        const id = parseInt(req.params.id);
+        const dataPath = path.join(__dirname, '..', 'data', 'issues.json');
+        if (!fs.existsSync(dataPath)) return res.status(404).json({ error: 'Not found' });
+
+        let issues = JSON.parse(fs.readFileSync(dataPath, 'utf8') || '[]');
+        issues = issues.filter(i => i.id !== id);
+
+        fs.writeFileSync(dataPath, JSON.stringify(issues, null, 2), 'utf8');
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to delete issue' });
+    }
+});
 
 // ── POST /api/issues/export-pdf ────────────────────────────────
 router.post('/api/issues/export-pdf', pdfRateLimit, asyncHandler(async (req, res) => {
     const data = req.body || {};
+    console.log('[Issues PDF] Export requested.');
+
+    // Normalize: support both single-issue and array-of-issues
     const issuesRaw = Array.isArray(data.issues) ? data.issues : [data];
     if (!issuesRaw.length) throw new AppError('이슈 데이터가 비어 있습니다.', 400, 'VALIDATION_ERROR');
 
     const title = data.title || '이슈 해결 결과 보고서';
     const logoBase64 = data.logoBase64 || '';
-    const sf = normalizeFieldFlags(data.selectedFields || data.sf || {});
-    const issues = issuesRaw.map(mapIssue);
 
-    console.log(`[issues] Exporting ${issues.length} issue(s) to PDF`);
+    // [Field Selector] Build field visibility flags
+    const rawSf = data.selectedFields || data.sf || {};
+    const sf = {
+        no: rawSf.no !== false && String(rawSf.no) !== 'false',
+        structure: rawSf.structure !== false && String(rawSf.structure) !== 'false',
+        work_type: rawSf.work_type !== false && String(rawSf.work_type) !== 'false',
+        description: rawSf.description !== false && String(rawSf.description) !== 'false',
+        resolution: rawSf.resolution !== false && String(rawSf.resolution) !== 'false',
+        screenshot: rawSf.screenshot !== false && String(rawSf.screenshot) !== 'false'
+    };
 
-    const html = getTemplate()({ title, logoBase64, issues, sf });
+    // Pre-compute combined flag for use in HBS
+    sf.hasMetaRow = sf.no || sf.structure || sf.work_type;
+
+    // Calculate layout properties
+    let totalColsCount = 0;
+    if (sf.no) totalColsCount += 2;
+    if (sf.structure) totalColsCount += 2;
+    if (sf.work_type) totalColsCount += 2;
+
+    sf.colspan = Math.max(1, totalColsCount - 1);
+    sf.totalCols = Math.max(1, totalColsCount);
+    sf.halfCols = Math.max(1, Math.floor(totalColsCount / 2));
+
+    // Map each raw issue to the template fields
+    const issues = issuesRaw.map((issue, idx) => {
+        // [Greedy Extraction Strategy]
+        const rawStruct = (issue.structure_name || issue.structureName || issue.structure || issue.struct || issue.Structure || '').toString().trim();
+        const rawWork = (issue.work_type || issue.workType || issue.work_Type || issue.worktype || issue.WorkType || '').toString().trim();
+
+        const valStruct = rawStruct || '-';
+        const valWork = rawWork || '-';
+        const valIssueNum = (issue.issue_number || issue.issueNumber || issue.dbId || issue.id || (idx + 1)).toString().trim();
+
+        return {
+            issueId: valIssueNum,
+            status: issue.status || 'Open',
+            pdf_structure: valStruct,
+            pdf_work_type: valWork,
+            description: issue.description || '내용 없음',
+            resolution_description: issue.resolutionDesc || issue.resolution_description || '내용 없음',
+            thumbnail: issue.thumbnail || '',
+            after_snapshot_url: issue.afterThumbnail || issue.after_snapshot_url || '',
+            isDualImage: (issue.isComparison === true || issue.isComparison === 'true') || (issue.status === 'Closed'),
+            versionA: issue.versionA || 'Before',
+            versionB: issue.versionB || 'After',
+            imageTableRows: issue.imageTableRows || ''
+        };
+    });
+
+    const templateData = { title, logoBase64, issues, sf };
+    const templatePath = path.join(__dirname, '..', 'views', 'issue-report.hbs');
+
+    const templateHtml = fs.readFileSync(templatePath, 'utf8');
+    const template = handlebars.compile(templateHtml);
+    const html = template(templateData);
 
     // Puppeteer: Windows/ngrok 환경 호환성 유지, 안전한 타임아웃
     const browser = await puppeteer.launch({
         headless: 'new',
         args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
-        timeout: 90_000,
+        timeout: 90000
     });
+
     try {
         const page = await browser.newPage();
-        page.setDefaultNavigationTimeout(90_000);
-        await page.setContent(html, { waitUntil: 'networkidle0', timeout: 90_000 });
+        page.setDefaultNavigationTimeout(90000);
+        await page.setContent(html, { waitUntil: 'networkidle0', timeout: 90000 });
 
         const pdfBuffer = await page.pdf({
             format: 'A4',
