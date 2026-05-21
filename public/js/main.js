@@ -245,6 +245,81 @@ async function renderProjectSelectionDashboard() {
     }
 }
 
+function renderProjectRows(projects) {
+    const projectListBody = document.getElementById('project-list-body');
+    projectListBody.innerHTML = '';
+
+    projects.forEach(project => {
+        const row = document.createElement('tr');
+
+        // Mock data for some fields to match the screenshot look
+        const projectNum = project.id.slice(-8).toUpperCase();
+        const createdDate = project.created ? new Date(project.created).toLocaleDateString('ko-KR', {
+            year: 'numeric', month: 'long', day: 'numeric'
+        }) : '-';
+
+        row.innerHTML = `
+            <td><div class="project-icon"><i class="fas fa-project-diagram"></i></div></td>
+            <td>
+                <div class="project-name-cell">${project.name}</div>
+                <div class="project-subtext">신축공사</div>
+            </td>
+            <td>${projectNum}</td>
+            <td>
+                <div class="access-chip">
+                    <i class="fas fa-file-alt"></i> Docs <i class="fas fa-caret-down"></i>
+                </div>
+            </td>
+            <td>${project.hubName}</td>
+            <td>${createdDate}</td>
+        `;
+
+        row.onclick = async () => {
+            console.log('[Dashboard] Project selected:', project.name);
+            const dashboard = document.getElementById('project-selection-dashboard');
+            if (dashboard) dashboard.style.display = 'none';
+
+            // Set global context
+            window.currentHubId = project.hubId;
+            window.currentProjectId = project.id;
+            localStorage.setItem('aps_last_hub_id', project.hubId);
+            localStorage.setItem('aps_last_project_id', project.id);
+
+            // [Optimization] проекта가 선택되면 뷰어 로드 전에도 즉시 이슈 분석(API Fetch) 가동
+            if (window.ContextHarness) {
+                console.log('[Dashboard] 프로젝트 선택됨. 백그라운드 이슈 수합(Aggregation) 시작');
+                window.ContextHarness.extract(null);
+            }
+
+            // Transition to Explorer mode
+            if (window.explorer) {
+                window.explorer.switchMode('explorer');
+
+                try {
+                    // [Feature] Automatically find and enter 'Project Files' folder
+                    const resp = await fetch(`/api/hubs/${project.hubId}/projects/${project.id}/contents`);
+                    if (resp.ok) {
+                        const items = await resp.json();
+                        const projectFiles = items.find(i => i.folder && i.name.toLowerCase().includes('project files'));
+                        if (projectFiles) {
+                            console.log('[Dashboard] Auto-navigating to Project Files:', projectFiles.id);
+                            window.explorer.showFolder(project.hubId, project.id, projectFiles.id, projectFiles.name);
+                            return;
+                        }
+                    }
+                } catch (err) {
+                    console.warn('[Dashboard] Failed to auto-locate Project Files, falling back to root:', err);
+                }
+
+                // Fallback to root (Top Folders)
+                window.explorer.showFolder(project.hubId, project.id, null, project.name);
+            }
+        };
+
+        projectListBody.appendChild(row);
+    });
+}
+
 
 
 
@@ -744,29 +819,22 @@ document.addEventListener('DOMContentLoaded', () => {
 
 // ── Tab Management ────────────────────────────────────────────────────────────
 function setupTabs() {
-    const headerMapBtn = document.getElementById('header-map-btn');
-    const headerDashboardBtn = document.getElementById('header-dashboard-btn');
-    const headerProjectsBtn = document.getElementById('header-projects-btn');
-    const tabProjects = document.getElementById('tab-projects');
-    const dashboardLegacy = document.getElementById('project-selection-dashboard');
-    const dashboardPremium = document.getElementById('dashboard-premium-container');
-    const mapContainer = document.getElementById('map-container');
-    const preview = document.getElementById('preview');
-    const explorerContainer = document.getElementById('explorer-container');
-    const comparisonContainer = document.getElementById('comparison-container');
-
-    if (!headerMapBtn || !tabProjects || !headerDashboardBtn || !headerProjectsBtn) return;
-
-    /** 모든 메인 패널을 숨기는 헬퍼 */
+    /** 모든 메인 패널을 숨기는 헬퍼 (호출 시점의 DOM 기준) */
     function hideAllPanels() {
+        const dashboardPremium = document.getElementById('dashboard-premium-container');
+        const dashboardLegacy = document.getElementById('project-selection-dashboard');
+        const mapContainer = document.getElementById('map-container');
+        const preview = document.getElementById('preview');
+        const explorerContainer = document.getElementById('explorer-container');
+        const comparisonContainer = document.getElementById('comparison-container');
+        const issueToggle = document.getElementById('issue-marker-toggle-wrap');
+
         if (dashboardPremium) dashboardPremium.style.display = 'none';
         if (dashboardLegacy) dashboardLegacy.style.display = 'none';
         if (mapContainer) mapContainer.style.display = 'none';
         if (preview) preview.style.display = 'none';
         if (explorerContainer) explorerContainer.style.display = 'none';
         if (comparisonContainer) comparisonContainer.style.display = 'none';
-        // 이슈 토글 버튼은 뷰어가 아닐 때 숨김
-        const issueToggle = document.getElementById('issue-marker-toggle-wrap');
         if (issueToggle) issueToggle.style.display = 'none';
     }
 
@@ -777,80 +845,91 @@ function setupTabs() {
     // 전역 노출 (뷰어 모드 진입 시 호출)
     window._showIssueToggle = showIssueToggle;
 
-    // Premium Dashboard button in Header
-    headerDashboardBtn.onclick = () => {
-        headerMapBtn.classList.remove('active');
-        headerProjectsBtn.classList.remove('active');
-        headerDashboardBtn.classList.add('active');
+    // 이벤트 위임을 사용하여 로그인 후 헤더 재렌더링 등 요소가 교체되어도 동작하도록 개선
+    document.addEventListener('click', async (e) => {
+        const clickedDashboard = e.target.closest('#header-dashboard-btn');
+        const clickedProjects = e.target.closest('#header-projects-btn');
+        const clickedMap = e.target.closest('#header-map-btn');
+        const clickedTabProjects = e.target.closest('#tab-projects');
 
-        hideAllPanels();
-        if (dashboardPremium) dashboardPremium.style.display = 'flex';
-    };
+        // 위 4개 버튼 중 하나라도 클릭되지 않았으면 무시
+        if (!clickedDashboard && !clickedProjects && !clickedMap && !clickedTabProjects) return;
 
-    // Legacy Projects List button in Header
-    headerProjectsBtn.onclick = () => {
-        headerMapBtn.classList.remove('active');
-        headerDashboardBtn.classList.remove('active');
-        headerProjectsBtn.classList.add('active');
-        tabProjects.classList.add('active');
+        // 버튼 상태 변경을 위해 최신 DOM 요소 조회
+        const dBtn = document.getElementById('header-dashboard-btn');
+        const pBtn = document.getElementById('header-projects-btn');
+        const mBtn = document.getElementById('header-map-btn');
+        const tProj = document.getElementById('tab-projects');
+        const dashboardPremium = document.getElementById('dashboard-premium-container');
+        const dashboardLegacy = document.getElementById('project-selection-dashboard');
+        const mapContainer = document.getElementById('map-container');
 
-        hideAllPanels();
-        if (dashboardLegacy) dashboardLegacy.style.display = 'flex';
-    };
-
-    // Map button in Header
-    headerMapBtn.onclick = async () => {
-        const isMapVisible = mapContainer.style.display === 'block';
-
-        if (isMapVisible) {
-            // 지도 → 대시보드로 복귀
-            headerMapBtn.classList.remove('active');
-            headerDashboardBtn.classList.add('active');
-            headerProjectsBtn.classList.remove('active');
+        if (clickedDashboard) {
+            if (mBtn) mBtn.classList.remove('active');
+            if (pBtn) pBtn.classList.remove('active');
+            if (dBtn) dBtn.classList.add('active');
 
             hideAllPanels();
             if (dashboardPremium) dashboardPremium.style.display = 'flex';
-        } else {
-            // 지도로 전환
-            headerDashboardBtn.classList.remove('active');
-            headerProjectsBtn.classList.remove('active');
-            headerMapBtn.classList.add('active');
+        } else if (clickedProjects || clickedTabProjects) {
+            if (mBtn) mBtn.classList.remove('active');
+            if (dBtn) dBtn.classList.remove('active');
+            if (pBtn) pBtn.classList.add('active');
+            if (tProj) tProj.classList.add('active');
 
-            hideAllPanels(); // explorer, preview, dashboard 모두 숨김
-            mapContainer.style.display = 'block';
+            hideAllPanels();
+            if (dashboardLegacy) dashboardLegacy.style.display = 'flex';
+        } else if (clickedMap) {
+            const isMapVisible = mapContainer && mapContainer.style.display === 'block';
 
-            if (!mapInitialized) {
-                if (mapApiKey) {
-                    try {
-                        await initMap('map-container', mapApiKey);
-                        mapInitialized = true;
-                        await loadHubsOnMap();
-                    } catch (err) {
-                        console.error('Map init error:', err);
-                        hideAllPanels();
-                        headerMapBtn.classList.remove('active');
-                        headerDashboardBtn.classList.add('active');
-                        if (dashboardPremium) dashboardPremium.style.display = 'flex';
-                        alert('지도를 불러오는 중 오류가 발생했습니다: ' + err.message);
+            if (isMapVisible) {
+                // 지도 -> 대시보드로 복귀
+                if (mBtn) mBtn.classList.remove('active');
+                if (dBtn) dBtn.classList.add('active');
+                if (pBtn) pBtn.classList.remove('active');
+
+                hideAllPanels();
+                if (dashboardPremium) dashboardPremium.style.display = 'flex';
+            } else {
+                // 지도로 전환
+                if (dBtn) dBtn.classList.remove('active');
+                if (pBtn) pBtn.classList.remove('active');
+                if (mBtn) mBtn.classList.add('active');
+
+                hideAllPanels();
+                if (mapContainer) mapContainer.style.display = 'block';
+
+                if (!mapInitialized) {
+                    if (mapApiKey) {
+                        try {
+                            await initMap('map-container', mapApiKey);
+                            mapInitialized = true;
+                            await loadHubsOnMap();
+                        } catch (err) {
+                            console.error('Map init error:', err);
+                            hideAllPanels();
+                            if (mBtn) mBtn.classList.remove('active');
+                            if (dBtn) dBtn.classList.add('active');
+                            if (dashboardPremium) dashboardPremium.style.display = 'flex';
+                            alert('지도를 불러오는 중 오류가 발생했습니다: ' + err.message);
+                        }
+                    } else {
+                         hideAllPanels();
+                         if (mBtn) mBtn.classList.remove('active');
+                         if (dBtn) dBtn.classList.add('active');
+                         if (dashboardPremium) dashboardPremium.style.display = 'flex';
+                         alert('.env 파일에 VWORLD_API_KEY 설정이 필요합니다.');
                     }
                 } else {
-                     hideAllPanels();
-                     headerMapBtn.classList.remove('active');
-                     headerDashboardBtn.classList.add('active');
-                     if (dashboardPremium) dashboardPremium.style.display = 'flex';
-                     alert('.env 파일에 VWORLD_API_KEY 설정이 필요합니다.');
+                    if (mapContainer) setTimeout(() => resizeMap(), 100);
                 }
-            } else {
-                setTimeout(() => resizeMap(), 100);
             }
         }
-    };
+    });
 
-    // Legacy inner tab (just in case it's used inside legacy or sidebars)
-    tabProjects.onclick = () => {
-        headerProjectsBtn.onclick(); // trigger the same logic as header projects btn
-    };
+    console.log('[setupTabs] 탭 이벤트 바인딩 완료 ✅ (이벤트 위임 적용)');
 }
+
 
 async function loadHubsOnMap() {
     try {

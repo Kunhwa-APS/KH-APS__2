@@ -1185,6 +1185,39 @@ export class IssueManager {
             const a = document.createElement('a'); a.href = url; a.download = `report_${Date.now()}.pdf`; a.click();
         }
     }
+
+    setupBulkExportButton() {
+        const btn = document.getElementById('bulk-pdf-btn');
+        if (!btn || btn.dataset.bound) return;
+        btn.dataset.bound = '1';
+
+        btn.onclick = () => {
+            const checked = [...document.querySelectorAll('.issue-check:checked')];
+            let targetIssues;
+            if (checked.length > 0) {
+                const ids = checked.map(c => parseInt(c.dataset.id));
+                targetIssues = this.issues.filter(i => ids.includes(i.id));
+            } else {
+                targetIssues = [...this.issues];
+            }
+
+            if (targetIssues.length === 0) {
+                alert('내보낼 이슈가 없습니다.');
+                return;
+            }
+
+            const modal = document.getElementById('pdf-export-modal');
+            if (!modal) return;
+
+            // [Fix] Store directly on instance, not in dataset
+            this.exportPayload = [...targetIssues];
+            modal.dataset.issueId = '';
+
+            this.setupPdfModalListeners();
+            this._populatePdfItemList();
+            modal.style.display = 'flex';
+        };
+    }
 }
 
 // 날짜 포맷팅을 위한 헬퍼 함수
