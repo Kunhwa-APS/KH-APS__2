@@ -39,10 +39,6 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
 
-<<<<<<< HEAD
-    <!-- Custom Styles -->
-    <link rel="stylesheet" href="/css/style.css?v=20260519_v3" />
-=======
     <!-- Cesium (VWorld 3D Map) -->
     <link rel="stylesheet" href="https://cesium.com/downloads/cesiumjs/releases/1.114/Build/Cesium/Widgets/widgets.css">
 
@@ -55,7 +51,6 @@
 
     <!-- UI Refresh Layer (must load last to override) -->
     <link rel="stylesheet" href="/css/ui-refresh.css?v=9" />
->>>>>>> origin/main
 
     <!-- Three Mesh BVH for Narrow Phase Clash -->
     <script src="https://unpkg.com/three-mesh-bvh@0.7.3/build/index.umd.cjs"></script>
@@ -684,25 +679,9 @@
     <!-- ── Header ─────────────────────────────────────────────────────────── -->
     <header class="header" role="banner">
         <div class="header-left">
-<<<<<<< HEAD
-            <div class="logo" onclick="location.href='/'" style="cursor: pointer;">
-                <svg width="28" height="28" viewBox="0 0 32 32" fill="none">
-                    <rect width="32" height="32" rx="8" fill="url(#grad1)" />
-                    <path d="M8 24L16 8L24 24H8Z" fill="white" opacity="0.9" />
-                    <path d="M12 24L16 16L20 24H12Z" fill="white" />
-                    <defs>
-                        <linearGradient id="grad1" x1="0" y1="0" x2="32" y2="32" gradientUnits="userSpaceOnUse">
-                            <stop offset="0%" stop-color="#6366f1" />
-                            <stop offset="100%" stop-color="#0ea5e9" />
-                        </linearGradient>
-                    </defs>
-                </svg>
-                <span class="logo-text">APS <span class="logo-accent">AI</span> Platform</span>
-=======
             <div class="logo">
                 <img src="/images/CI-KH로고.png" alt="건화 로고" style="height:32px; width:auto; object-fit:contain;" />
                 <span class="logo-text">Kunhwa <span class="logo-accent">AI</span> Platform</span>
->>>>>>> origin/main
             </div>
         </div>
         <div class="header-right">
@@ -824,8 +803,6 @@
             <!-- Normal Single Viewer -->
             <div id="preview"></div>
 
-<<<<<<< HEAD
-=======
             <!-- Map Panel -->
             <div id="map-container" style="display:none; width: 100%; height: 100%;"></div>
 
@@ -1037,7 +1014,6 @@
                     </table>
                 </div>
             </div>
->>>>>>> origin/main
 
 
 
@@ -1557,11 +1533,8 @@
     <script src="/js/explorer.js?v=20260519_v3" type="module"></script>
     <!-- Navisworks-style Clash Detective Extension -->
     <script src="/js/NavisClashExtension.js"></script>
-<<<<<<< HEAD
-=======
     <!-- Premium Dashboard Logic -->
     <script src="/js/dashboard-premium.js?v=1.1" type="module"></script>
->>>>>>> origin/main
     <!-- main.js wires viewer + tree as ES6 module -->
     <script src="/js/main.js?v=20260519_v3" type="module"></script>
 
@@ -1605,12 +1578,6 @@
         document.addEventListener('DOMContentLoaded', () => {
             const handle = document.getElementById('sidebar-resize-handle');
             const sidebar = document.getElementById('sidebar-left');
-<<<<<<< HEAD
-            let dragging = false;
-            let startX, startW;
-
-            handle?.addEventListener('mousedown', (e) => {
-=======
             const leftCollapseBtn = document.getElementById('left-collapse-btn');
             const MIN_W = 180;
             const MAX_W = 520;
@@ -1630,7 +1597,6 @@
                 if (e.target.closest('#left-collapse-btn')) return;
                 // Don't allow resize while collapsed
                 if (sidebar.classList.contains('collapsed')) return;
->>>>>>> origin/main
                 dragging = true;
                 startX = e.clientX;
                 startW = sidebar.getBoundingClientRect().width;
