@@ -345,22 +345,26 @@ export async function loadVersions(urnA, urnB) {
     // 모델 로드 수행
     await Promise.all([loadModel(viewers[0], urnA), loadModel(viewers[1], urnB)]);
 
-    // [강제 업데이트] 로드 완료 후 즉시 이름 주입 (이벤트가 씹히는 경우 대비)
+    // [강제 업데이트] 로드 완료 후 즉시 이름 주입
     [0, 1].forEach(idx => {
         const v = viewers[idx];
         if (v && v.model) {
-            const name = v.model.getDocumentNode()?.data?.name ||
-                v.model.getData()?.loadOptions?.bubbleNode?.getDisplayName() ||
-                "Unknown Model";
+            const node = v.model.getDocumentNode();
+            const rawName = node?.data?.name || 
+                           v.model.getData()?.loadOptions?.bubbleNode?.getDisplayName() || 
+                           "Unknown Model";
+
+            // 버전 번호 추출 (node.data 또는 파일명 파싱 fallback)
+            const vNum = node?.data?.versionNumber || "";
+            const formattedName = window.formatBimModelName ? window.formatBimModelName(rawName, vNum) : rawName;
 
             const elId = idx === 0 ? 'slot-a-name' : 'slot-b-name';
             const el = document.getElementById(elId);
 
             if (el) {
-                el.textContent = name;
-                console.log(`[Manual UI Update] ${elId} successfully set to: ${name}`);
-            } else {
-                console.error(`[Manual UI Update] Element not found: ${elId}`);
+                el.textContent = formattedName;
+                el.style.color = "#fff";
+                console.log(`[Manual UI Update] ${elId} set to: ${formattedName}`);
             }
         }
     });
@@ -544,29 +548,60 @@ function compareProperties(propsA, propsB) {
  */
 export function visualizeDiff(results) {
     if (!results || viewers.length < 2) return;
-    viewers[0].clearThemingColors();
-    viewers[1].clearThemingColors();
+    
+    // 명시적 모델 참조 (Version A: viewers[0], Version B: viewers[1])
+    const modelA = viewers[0].model;
+    const modelB = viewers[1].model;
+    
+    if (modelA) viewers[0].clearThemingColors(modelA);
+    if (modelB) viewers[1].clearThemingColors(modelB);
 
-    const applyGhost = (viewer) => {
-        const it = viewer.model.getInstanceTree();
+    const applyGhost = (viewer, model) => {
+        if (!model) return;
+        const it = model.getInstanceTree();
         if (!it) return;
+        
         it.enumNodeChildren(it.getRootId(), (dbId) => {
-            viewer.setThemingColor(dbId, COLORS.ghost, null, true);
+            let fragCount = 0;
+            it.enumNodeFragments(dbId, () => { fragCount++; });
+            if (fragCount === 0) return; // 실제 프래그먼트(형상)가 없는 경우 스킵
+            
+            try {
+                viewer.setThemingColor(dbId, COLORS.ghost, model, true);
+            } catch (err) {
+                // 특정 노드 적용 실패 무시
+            }
         }, true);
     };
-    applyGhost(viewers[0]);
-    applyGhost(viewers[1]);
+    
+    applyGhost(viewers[0], modelA);
+    applyGhost(viewers[1], modelB);
 
-    (results.added || []).forEach(obj => { if (obj.dbId) viewers[1].setThemingColor(obj.dbId, COLORS.added, null, true); });
-    (results.removed || []).forEach(obj => { if (obj.dbId) viewers[0].setThemingColor(obj.dbId, COLORS.removed, null, true); });
-    (results.changed || []).forEach(obj => {
-        if (obj.dbId) {
-            viewers[1].setThemingColor(obj.dbId, COLORS.changed, null, true);
-            // Also find the relative dbId in viewer 0
-            // Since we use externalId mapping, we can store that or find it again.
-            // For now, let's focus on the 'current' version highlight.
-        }
-    });
+    if (modelB) {
+        (results.added || []).forEach(obj => { 
+            if (obj.dbId) {
+                try { viewers[1].setThemingColor(obj.dbId, COLORS.added, modelB, true); } catch (e) {}
+            }
+        });
+        (results.changed || []).forEach(obj => {
+            if (obj.dbId) {
+                try { viewers[1].setThemingColor(obj.dbId, COLORS.changed, modelB, true); } catch (e) {}
+            }
+        });
+    }
+    
+    if (modelA) {
+        (results.removed || []).forEach(obj => { 
+            if (obj.dbId) {
+                try { viewers[0].setThemingColor(obj.dbId, COLORS.removed, modelA, true); } catch (e) {}
+            }
+        });
+        (results.changed || []).forEach(obj => {
+            if (obj.oldDbId) {
+                try { viewers[0].setThemingColor(obj.oldDbId, COLORS.changed, modelA, true); } catch (e) {}
+            }
+        });
+    }
 
     updateResultsPanel(results);
 }
@@ -574,6 +609,10 @@ export function visualizeDiff(results) {
 function updateResultsPanel(results) {
     const columnsPanel = document.getElementById('diff-results-three-columns');
     if (columnsPanel) columnsPanel.style.display = 'flex';
+
+    // Show tabs
+    const comparisonTabs = document.getElementById('comparison-tabs');
+    if (comparisonTabs) comparisonTabs.style.display = 'flex';
 
     // Show export & filter toolbars
     const exportBar = document.getElementById('diff-export-toolbar');
@@ -812,8 +851,17 @@ function filterTableByCategory(tbodyId, category, countSpanId, fullList) {
 }
 
 function applyThemingColorToList(viewer, list, color) {
-    if (!viewer) return;
-    list.forEach(obj => { if (obj.dbId) viewer.setThemingColor(obj.dbId, color, null, true); });
+    if (!viewer || !viewer.model) return;
+    const model = viewer.model;
+    list.forEach(obj => { 
+        if (obj.dbId) {
+            try {
+                viewer.setThemingColor(obj.dbId, color, model, true); 
+            } catch (e) {
+                // 무시
+            }
+        }
+    });
 }
 
 export function showDiffList(type) { }
@@ -947,13 +995,13 @@ export function exitCompareMode() {
     const panelIds = [
         'diff-results-three-columns',
         'diff-export-toolbar',
-        'diff-filter-toolbar'
+        'diff-filter-toolbar',
+        'comparison-tabs'
     ];
     panelIds.forEach(id => {
         const el = document.getElementById(id);
         if (el) el.style.display = 'none';
     });
-
     // 3. Reset filter dropdowns to "all"
     ['filter-all-categories', 'filter-added-categories', 'filter-removed-categories', 'filter-changed-categories'].forEach(id => {
         const sel = document.getElementById(id);
@@ -968,6 +1016,30 @@ export function exitCompareMode() {
 
     // 5. Clear diff data
     currentDiffData = null;
+
+    // 6. Reset active tab to results-tab and reset PDF dropdown wrap visibility states
+    try {
+        const tabs = document.querySelectorAll('#comparison-tabs .tab-btn');
+        tabs.forEach(t => {
+            if (t.getAttribute('data-tab') === 'results-tab') {
+                t.classList.add('active');
+            } else {
+                t.classList.remove('active');
+            }
+        });
+        const panes = document.querySelectorAll('#comparison-tab-content .tab-pane');
+        panes.forEach(p => {
+            if (p.id === 'results-tab') {
+                p.classList.add('active');
+            } else {
+                p.classList.remove('active');
+            }
+        });
+        const pdfWrap = document.getElementById('comp-pdf-dropdown-wrap');
+        if (pdfWrap) pdfWrap.style.display = 'none';
+    } catch (e) {
+        console.warn('[Diff] Error resetting tabs on exit:', e.message);
+    }
 
     console.log('[Diff] Compare mode fully exited. All panels hidden, viewers unloaded.');
 }
@@ -1643,11 +1715,14 @@ const ResizingEngine = (() => {
         }
     }
 
-    // ── 2. Vertical Results Area Resizing ───────────────────────
+    // ── 2. Horizontal Resizer (Panel Height Adjustment) ──────────
     function initVerticalResizer() {
-        const vHandle = document.getElementById('diff-v-resizer-handle');
+        const vHandle = document.getElementById('resizer-h');
         const resultsArea = document.getElementById('diff-results-three-columns');
         if (!vHandle || !resultsArea) return;
+
+        let vDragging = false;
+        let startY, startH;
 
         vHandle.addEventListener('mousedown', (e) => {
             vDragging = true;
@@ -1666,7 +1741,11 @@ const ResizingEngine = (() => {
             const newH = Math.max(100, Math.min(maxH, startH - delta));
 
             resultsArea.style.height = newH + 'px';
-            triggerViewerResize();
+            
+            // 🌟 3D 캔버스 찌그러짐 방지를 위해 모든 활성 뷰어 리사이즈
+            if (window.viewerLeft) window.viewerLeft.resize();
+            if (window.viewerRight) window.viewerRight.resize();
+            if (window._viewer) window._viewer.resize();
         });
 
         document.addEventListener('mouseup', () => {
@@ -1675,7 +1754,10 @@ const ResizingEngine = (() => {
             vHandle.classList.remove('dragging');
             document.body.style.cursor = '';
             document.body.style.userSelect = '';
-            triggerViewerResize();
+            
+            if (window.viewerLeft) window.viewerLeft.resize();
+            if (window.viewerRight) window.viewerRight.resize();
+            if (window._viewer) window._viewer.resize();
         });
     }
 

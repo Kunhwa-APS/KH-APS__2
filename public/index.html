@@ -29,25 +29,634 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
 
-    <!-- Cesium (VWorld 3D Map) -->
-    <link rel="stylesheet" href="https://cesium.com/downloads/cesiumjs/releases/1.114/Build/Cesium/Widgets/widgets.css">
-
     <!-- Custom Styles -->
-    <link rel="stylesheet" href="/css/style.css" />
-    <link rel="stylesheet" href="/css/dashboard-premium.css" />
+    <link rel="stylesheet" href="/css/style.css?v=20260519_v3" />
 
     <!-- Three Mesh BVH for Narrow Phase Clash -->
     <script src="https://unpkg.com/three-mesh-bvh@0.7.3/build/index.umd.cjs"></script>
+    <!-- [NEW] Tab Layout CSS Override -->
+    <style>
+        .tab-pane {
+            display: none !important;
+        }
+        /* 버전 비교 탭 컨테이너의 원래 display 속성에 맞게 부여 (flex) */
+        #results-tab.tab-pane.active {
+            display: flex !important; 
+            flex-direction: column;
+            width: 100%;
+        }
+        #issues-tab.tab-pane.active {
+            display: flex !important;
+            flex-direction: column;
+            width: 100%;
+        }
+        #issues-tab table {
+            width: 100% !important;
+            table-layout: fixed; /* 컬럼 너비가 부서지지 않도록 고정 */
+            border-collapse: collapse;
+        }
+        #issues-tab table th, #issues-tab table td {
+            padding: 12px;
+            border-bottom: 1px solid #3f3f46; /* 행을 구분하는 선 추가 */
+            text-align: left; /* 좌측 정렬 */
+            vertical-align: middle;
+            position: relative; /* 열 너비 조절 핸들용 */
+        }
+        /* 제목 열(예: 1번째 열 또는 .col-title 클래스) 정렬 분기 */
+        #issues-tab table .col-title {
+            text-align: left !important;
+            padding-left: 12px;
+        }
+        .resize-handle {
+            position: absolute;
+            top: 0; right: 0; bottom: 0;
+            width: 6px;
+            cursor: col-resize;
+            user-select: none;
+            z-index: 1;
+        }
+        .resize-handle:hover {
+            background-color: #deff9a; /* 마우스 올렸을 때 하이라이트 */
+        }
+    </style>
+    <script>
+        window.forceOpenTab = function(tabId, btnElement) {
+            console.log("🚀 강제 탭 전환 호출됨:", tabId);
+            // 모든 탭 컨텐츠 숨기기
+            const allTabs = document.querySelectorAll('.tab-content, [id$="-tab"], .tab-pane');
+            allTabs.forEach(tab => {
+                if (tab.id === 'comparison-tab-content') return;
+                tab.style.setProperty('display', 'none', 'important');
+                tab.classList.remove('active');
+            });
+            
+            // 타겟 탭만 보이기 (flex 레이아웃 유지)
+            const targetTab = document.getElementById(tabId);
+            if (targetTab) {
+                targetTab.style.setProperty('display', 'flex', 'important');
+                targetTab.classList.add('active');
+            }
+            
+            // 버튼 활성화 스타일 변경
+            if (btnElement) {
+                document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+                btnElement.classList.add('active');
+            }
 
-    <!-- Chart.js -->
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+            // PDF 내보내기 버튼 상태 토글
+            const pdfWrap = document.getElementById('comp-pdf-dropdown-wrap');
+            if (tabId === 'issues-tab') {
+                if (pdfWrap) pdfWrap.style.setProperty('display', 'block', 'important');
+            } else {
+                if (pdfWrap) pdfWrap.style.setProperty('display', 'none', 'important');
+            }
+
+            // 이슈 탭 렌더링 호출
+            if (tabId === 'issues-tab') {
+                if (typeof window.renderComparisonIssues === 'function') {
+                    const projectId = window.currentProjectId || "default_project";
+                    window.renderComparisonIssues(projectId);
+                }
+            }
+        };
+
+        // 팝업 강제 닫기 함수
+        window.forceClosePopup = function(e) {
+            if (e) e.preventDefault();
+            console.log("🚀 강제 팝업 닫기 호출됨");
+            const popup = document.getElementById('comparison-issue-popup') || document.getElementById('comp-issue-popup') || document.querySelector('.popup-container');
+            if (popup) popup.style.setProperty('display', 'none', 'important');
+        };
+
+        window.convertBlobToBase64 = async function(blobUrl) {
+            if (!blobUrl || !blobUrl.startsWith('blob:')) return blobUrl; // 이미 Base64거나 빈 값이면 그대로 반환
+            
+            try {
+                const response = await fetch(blobUrl);
+                const blob = await response.blob();
+                return new Promise((resolve, reject) => {
+                    const reader = new FileReader();
+                    reader.onloadend = () => resolve(reader.result); // Base64 Data URL 반환
+                    reader.onerror = reject;
+                    reader.readAsDataURL(blob);
+                });
+            } catch (error) {
+                console.error("🚨 Blob을 Base64로 변환하는 데 실패했습니다:", error);
+                return ''; // 실패 시 빈 문자열 반환하여 엑스박스 방지
+            }
+        };
+
+        // 팝업 강제 저장 함수
+        window.forceSavePopup = async function(e) {
+            if (e) e.preventDefault();
+            console.log("🚀 강제 저장 호출됨");
+            
+            const popup = document.getElementById('comparison-issue-popup');
+            if (!popup) {
+                console.error("Popup not found");
+                return;
+            }
+            
+            const title = document.getElementById('comp-issue-title').value;
+            const contentA = document.getElementById('comp-issue-content-a').value;
+            const contentB = document.getElementById('comp-issue-content-b').value;
+            const assignee = document.getElementById('comp-issue-assignee').value;
+            const structure = document.getElementById('comp-issue-structure').value;
+            const workType = document.getElementById('comp-issue-work-type').value;
+            
+            const dbId = popup.dataset.dbId;
+            const point = popup.dataset.point ? JSON.parse(popup.dataset.point) : null;
+            
+            let imgA = popup.dataset.imgA || '';
+            let imgB = popup.dataset.imgB || '';
+            
+            // 🚨 핵심: 저장하기 전에 임시 Blob URL을 영구 Base64 데이터로 변환
+            if (imgA && imgA.startsWith('blob:')) {
+                imgA = await window.convertBlobToBase64(imgA);
+            }
+            if (imgB && imgB.startsWith('blob:')) {
+                imgB = await window.convertBlobToBase64(imgB);
+            }
+            
+            const versionA = popup.dataset.versionA;
+            const versionB = popup.dataset.versionB;
+            
+            const urn = window.currentUrn || '';
+            const projectId = window.currentProjectId || 'default_project';
+            const viewstate = window.viewerLeft ? window.viewerLeft.getState() : null;
+            
+            const id = window.editingIssueId || Date.now();
+            
+            const issueData = {
+                id: id,
+                title: title || '버전비교 이슈',
+                description: contentA || '',
+                resolutionDesc: contentB || '',
+                assignee: assignee || 'Unassigned',
+                structureName: structure || '',
+                workType: workType || '',
+                dbId: dbId || null,
+                point: point || null,
+                thumbnail: imgA || '',
+                afterThumbnail: imgB || '',
+                beforeImage: imgA || '',
+                afterImage: imgB || '',
+                versionA: versionA || '',
+                versionB: versionB || '',
+                urn: urn || '',
+                projectId: projectId || 'default_project',
+                status: 'Open',
+                isComparison: true,
+                viewstate: viewstate
+            };
+            
+            // 기존 시스템에 구현된 저장 로직(saveComparisonIssue 등) 호출
+            if (typeof saveComparisonIssue === 'function') {
+                saveComparisonIssue();
+                window.editingIssueId = null;
+                window.forceClosePopup();
+                return;
+            }
+
+            fetch('/api/issues', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(issueData)
+            })
+            .then(res => {
+                if (res.ok) {
+                    console.log("Comparison issue saved successfully!");
+                    window.editingIssueId = null;
+                    window.forceClosePopup();
+                    window.renderComparisonIssues(projectId);
+                } else {
+                    alert("저장 실패");
+                }
+            })
+            .catch(err => {
+                console.error("Error saving comparison issue:", err);
+            });
+        };
+
+        window.deleteComparisonIssue = async function(id, event) {
+            if (event) {
+                event.stopPropagation();
+                event.preventDefault();
+            }
+            if (!confirm('정말 삭제하시겠습니까?')) return;
+            try {
+                const resp = await fetch(`/api/issues/${id}`, { method: 'DELETE' });
+                if (resp.ok) {
+                    console.log('Comparison issue deleted:', id);
+                    const projectId = window.currentProjectId || "default_project";
+                    window.renderComparisonIssues(projectId);
+                }
+            } catch (e) {
+                console.error('Failed to delete comparison issue:', e);
+            }
+        };
+
+        window.editComparisonIssue = function(id) {
+            console.log("Editing comparison issue:", id);
+            let issue = null;
+            if (window.comparisonIssues) {
+                issue = window.comparisonIssues.find(i => i.id === id);
+            }
+            if (!issue) return;
+            
+            window.editingIssueId = id;
+            const popup = document.getElementById('comparison-issue-popup');
+            if (!popup) return;
+            
+            document.getElementById('comp-issue-title').value = issue.title || '';
+            document.getElementById('comp-issue-content-a').value = issue.description || '';
+            document.getElementById('comp-issue-content-b').value = issue.resolutionDesc || '';
+            document.getElementById('comp-issue-assignee').value = issue.assignee || 'Unassigned';
+            document.getElementById('comp-issue-structure').value = issue.structureName || '';
+            document.getElementById('comp-issue-work-type').value = issue.workType || '';
+            
+            const beforeUrlVal = issue.beforeImage || issue.thumbnail || '';
+            const afterUrlVal = issue.afterImage || issue.afterThumbnail || '';
+
+            document.getElementById('comp-issue-img-a').src = beforeUrlVal;
+            document.getElementById('comp-issue-img-b').src = afterUrlVal;
+            
+            const headerA = document.getElementById('comp-version-a-header');
+            const headerB = document.getElementById('comp-version-b-header');
+            if (headerA) headerA.textContent = `${issue.versionA || 'Version A'} (변경 전)`;
+            if (headerB) headerB.textContent = `${issue.versionB || 'Version B'} (변경 후)`;
+            
+            popup.dataset.dbId = issue.dbId || '';
+            popup.dataset.point = issue.point ? JSON.stringify(issue.point) : '';
+            popup.dataset.imgA = beforeUrlVal;
+            popup.dataset.imgB = afterUrlVal;
+            popup.dataset.versionA = issue.versionA || '';
+            popup.dataset.versionB = issue.versionB || '';
+            
+            popup.style.display = 'flex';
+            
+            if (issue.viewstate && window.viewerLeft) {
+                try {
+                    const state = typeof issue.viewstate === 'string' ? JSON.parse(issue.viewstate) : issue.viewstate;
+                    window.viewerLeft.restoreState(state);
+                } catch(err) {
+                    console.warn("Failed to restore state on left viewer:", err);
+                }
+            }
+        };
+
+        window.toggleSelectAllCompIssues = function(masterCheckbox) {
+            const isChecked = masterCheckbox.checked;
+            document.querySelectorAll('.comp-issue-check').forEach(cb => {
+                cb.checked = isChecked;
+            });
+        };
+
+        window.toggleCompPdfDropdown = function(e) {
+            // 1. 이벤트 버블링 및 기본 동작 완벽 차단 (다른 클릭 이벤트와 충돌 방지)
+            if (e) {
+                e.preventDefault();
+                e.stopPropagation(); 
+            }
+            
+            console.log("🚀 PDF 내보내기 드롭다운 토글 실행됨");
+            
+            // 2. 실제 HTML에 존재하는 PDF 드롭다운 메뉴 엘리먼트 찾기 및 없으면 동적 생성 방어
+            let dropdown = document.getElementById('comp-pdf-dropdown-menu') || document.querySelector('.pdf-dropdown-menu');
+            
+            if (!dropdown) {
+                console.log("🛠️ 드롭다운 HTML이 없어 동적으로 강제 생성합니다.");
+                dropdown = document.createElement('div');
+                dropdown.id = 'comp-pdf-dropdown-menu';
+                dropdown.className = 'pdf-dropdown-menu';
+                dropdown.innerHTML = `
+                    <ul style="list-style: none; padding: 10px; margin: 0; color: #ffffff;">
+                        <li class="pdf-export-option" data-type="all" style="padding: 10px 12px; cursor: pointer; border-bottom: 1px solid rgba(255,255,255,0.1); border-radius: 7px; display: flex; align-items: center; gap: 10px;">📋 전체 내보내기</li>
+                        <li class="pdf-export-option" data-type="selected" style="padding: 10px 12px; cursor: pointer; border-radius: 7px; display: flex; align-items: center; gap: 10px;">✅ 선택 항목 내보내기</li>
+                    </ul>
+                `;
+                
+                const btn = document.getElementById('btn-comp-export-pdf');
+                if (btn && btn.parentNode) {
+                    btn.parentNode.style.position = 'relative';
+                    btn.parentNode.appendChild(dropdown);
+                } else {
+                    document.body.appendChild(dropdown);
+                }
+            }
+
+            // 🚨 무조건 화면 최상단에 보이도록 강력한 CSS 주입
+            dropdown.style.setProperty('position', 'absolute', 'important');
+            dropdown.style.setProperty('z-index', '999999', 'important');
+            dropdown.style.setProperty('background', '#1a1a2e', 'important');
+            dropdown.style.setProperty('border', '1px solid rgba(220, 38, 38, 0.35)', 'important');
+            dropdown.style.setProperty('box-shadow', '0 8px 32px rgba(0, 0, 0, 0.6)', 'important');
+            dropdown.style.setProperty('min-width', '220px', 'important');
+            dropdown.style.setProperty('opacity', '1', 'important');
+            dropdown.style.setProperty('pointer-events', 'all', 'important');
+            
+            // 버튼 바로 아래로 위치 조정
+            const btn = document.getElementById('btn-comp-export-pdf');
+            if (btn) {
+                dropdown.style.setProperty('top', (btn.offsetTop + btn.offsetHeight + 5) + 'px', 'important');
+                dropdown.style.setProperty('left', btn.offsetLeft + 'px', 'important');
+            }
+
+            // 드롭다운 강제 토글 (화면에 없으면 띄우고, 있으면 닫기)
+            const isHidden = window.getComputedStyle(dropdown).display === 'none' || dropdown.style.display === 'none';
+            if (isHidden) {
+                dropdown.style.setProperty('display', 'block', 'important');
+            } else {
+                dropdown.style.setProperty('display', 'none', 'important');
+            }
+
+            // 동적 생성된 항목 혹은 기존 항목들에 클릭 이벤트 리스너 바인딩
+            const optAll = dropdown.querySelector('[data-type="all"]');
+            if (optAll && !optAll.onclick) {
+                optAll.onclick = function(evt) {
+                    if (evt) evt.stopPropagation();
+                    window.exportComparisonIssuesPdf(true);
+                    dropdown.style.setProperty('display', 'none', 'important');
+                };
+            }
+            const optSel = dropdown.querySelector('[data-type="selected"]');
+            if (optSel && !optSel.onclick) {
+                optSel.onclick = function(evt) {
+                    if (evt) evt.stopPropagation();
+                    window.exportComparisonIssuesPdf(false);
+                    dropdown.style.setProperty('display', 'none', 'important');
+                };
+            }
+        };
+
+        // 4. 드롭다운 바깥(바탕화면) 영역을 클릭했을 때 드롭다운이 닫히도록 편의성 방어 코드 추가
+        document.addEventListener('click', function(e) {
+            const dropdown = document.getElementById('comp-pdf-dropdown-menu') || document.querySelector('.pdf-dropdown-menu');
+            const pdfBtn = document.getElementById('btn-comp-export-pdf');
+            
+            // 클릭한 곳이 드롭다운 내부나 PDF 버튼 자체가 아니라면 강제 숨김 처리
+            if (dropdown && !dropdown.contains(e.target) && pdfBtn && !pdfBtn.contains(e.target)) {
+                dropdown.style.setProperty('display', 'none', 'important');
+            }
+        });
+
+        window.comparisonIssues = [];
+
+        window.imageToBase64 = function(url) {
+            return new Promise((resolve, reject) => {
+                if (!url) {
+                    resolve('');
+                    return;
+                }
+
+                let finalUrl = url.trim();
+
+                // 🚨 1차 방어: 이미 잘못 결합되어 들어온 URL 복구 (예: http://localhost:8080/blob:...)
+                if (finalUrl.includes('/blob:')) {
+                    finalUrl = finalUrl.substring(finalUrl.indexOf('blob:'));
+                }
+
+                // 🚨 1.5차 방어: 이미 Base64 데이터 URL인 경우 공백 등 정규화하여 그대로 즉시 반환
+                if (/^\s*data:/i.test(finalUrl)) {
+                    let normalized = finalUrl.replace(/^data:\s*/i, 'data:');
+                    normalized = normalized.replace(/;base64,\s*/i, ';base64,');
+                    normalized = normalized.replace(/\s/g, ''); // base64 내의 공백 제거
+                    resolve(normalized);
+                    return;
+                }
+
+                // 🚨 2차 방어: URL이 blob, data, http 등으로 시작하면 도메인을 강제로 붙이지 않음
+                if (!finalUrl.startsWith('blob:') && !finalUrl.startsWith('data:') && !finalUrl.startsWith('http')) {
+                    // 상대 경로인 경우에만 현재 도메인 결합
+                    const origin = window.location.origin;
+                    finalUrl = origin + (finalUrl.startsWith('/') ? '' : '/') + finalUrl;
+                }
+
+                const img = new Image();
+                img.crossOrigin = 'Anonymous'; // CORS 에러 방지
+                img.onload = () => {
+                    const canvas = document.createElement('canvas');
+                    canvas.width = img.width;
+                    canvas.height = img.height;
+                    const ctx = canvas.getContext('2d');
+                    ctx.drawImage(img, 0, 0);
+                    try {
+                        const dataURL = canvas.toDataURL('image/jpeg', 0.8);
+                        resolve(dataURL);
+                    } catch (e) {
+                        console.error("Canvas toDataURL 변환 실패 (CORS 오염 등):", e);
+                        resolve(finalUrl); // 실패 시 원본 URL이라도 반환
+                    }
+                };
+                img.onerror = (e) => {
+                    console.error("Image load failed for URL:", finalUrl);
+                    resolve(''); // 에러 시 빈 문자열을 반환하여 전체 PDF 생성이 멈추는 것을 방지
+                };
+                
+                img.src = finalUrl;
+            });
+        };
+
+        window.exportComparisonIssuesPdf = async function(exportAll) {
+            console.log("Exporting comparison issues PDF...", exportAll ? "all" : "selected");
+            
+            const checkedBoxes = document.querySelectorAll('.comp-issue-check:checked');
+            const checkedIds = [...checkedBoxes].map(cb => parseInt(cb.dataset.id));
+            
+            try {
+                const resp = await fetch('/api/issues');
+                if (!resp.ok) throw new Error("Failed to fetch issues");
+                const issues = await resp.json();
+                
+                let targetIssues = issues.filter(i => i.isComparison === true);
+                if (!exportAll) {
+                    targetIssues = targetIssues.filter(i => checkedIds.includes(i.id));
+                }
+                
+                if (targetIssues.length === 0) {
+                    alert("내보낼 이슈가 없습니다. 항목을 선택하거나 이슈를 추가해 주세요.");
+                    return;
+                }
+                
+                const processedIssues = targetIssues.map((issue) => {
+                    console.log("🚀 PDF 렌더링을 위한 이슈 데이터 검증:", issue);
+                    
+                    const updated = { ...issue };
+                    
+                    // 1. 변환 없이 객체의 Base64 데이터를 그대로 사용
+                    const beforeImg = issue.beforeImage || '';
+                    const afterImg = issue.afterImage || '';
+
+                    // 문자열을 '_'로 분리하여 마지막 요소(버전명)만 추출
+                    var rawVerA = issue.versionA ? issue.versionA : "Before";
+                    var rawVerB = issue.versionB ? issue.versionB : "After";
+                    
+                    var verA = rawVerA.includes('_') ? rawVerA.split('_').pop() : rawVerA;
+                    var verB = rawVerB.includes('_') ? rawVerB.split('_').pop() : rawVerB;
+
+                    // object-fit: cover를 사용하여 이미지가 칸 비율에 맞게 꽉 차도록 수정
+                    var beforeTag = "<span style='color:#999;'>이미지 없음</span>";
+                    if (issue.beforeImage) {
+                        beforeTag = "<img src='" + issue.beforeImage + "' style='width: 100%; height: 280px; object-fit: cover; object-position: center;'>";
+                    }
+
+                    var afterTag = "<span style='color:#999;'>이미지 없음</span>";
+                    if (issue.afterImage) {
+                        afterTag = "<img src='" + issue.afterImage + "' style='width: 100%; height: 280px; object-fit: cover; object-position: center;'>";
+                    }
+
+                    var imageTableRows = "" +
+                    "<tr>" +
+                        "<td colspan='6' style='padding: 0 !important; border: none !important;'>" +
+                            "<table style='width: 100% !important; border-collapse: collapse !important; table-layout: fixed !important; margin: 0 !important; padding: 0 !important; border: none !important;'>" +
+                                "<tr style='background-color: #eaecf0;'>" +
+                                    "<td width='50%' style='width: 50% !important; min-width: 50% !important; max-width: 50% !important; text-align: center; font-weight: bold; padding: 10px; border: 1px solid #777;'>변경 전 (" + verA + ")</td>" +
+                                    "<td width='50%' style='width: 50% !important; min-width: 50% !important; max-width: 50% !important; text-align: center; font-weight: bold; padding: 10px; border: 1px solid #777;'>변경 후 (" + verB + ")</td>" +
+                                "</tr>" +
+                                "<tr>" +
+                                    "<td width='50%' style='width: 50% !important; min-width: 50% !important; max-width: 50% !important; text-align: center; vertical-align: middle; padding: 10px; border: 1px solid #777; height: 400px;'>" + beforeTag + "</td>" +
+                                    "<td width='50%' style='width: 50% !important; min-width: 50% !important; max-width: 50% !important; text-align: center; vertical-align: middle; padding: 10px; border: 1px solid #777; height: 400px;'>" + afterTag + "</td>" +
+                                "</tr>" +
+                            "</table>" +
+                        "</td>" +
+                    "</tr>";
+                    
+                    updated.thumbnail = beforeImg;
+                    updated.afterThumbnail = afterImg;
+                    updated.beforeImage = beforeImg;
+                    updated.afterImage = afterImg;
+                    updated.imageTableRows = imageTableRows;
+                    
+                    return updated;
+                });
+                
+                const payload = {
+                    title: '버전 비교 이슈 보고서',
+                    issues: processedIssues,
+                    sf: {
+                        no: true,
+                        structure: true,
+                        work_type: true,
+                        description: true,
+                        resolution: true,
+                        screenshot: true
+                    }
+                };
+                
+                const exportResp = await fetch('/api/issues/export-pdf', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                
+                if (exportResp.ok) {
+                    const blob = await exportResp.blob();
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `comparison_report_${Date.now()}.pdf`;
+                    a.click();
+                } else {
+                    alert("PDF 생성 실패");
+                }
+            } catch(err) {
+                console.error("Error exporting comparison PDF:", err);
+                alert("PDF 내보내기 중 오류가 발생했습니다.");
+            }
+        };
+
+        window.renderComparisonIssues = function(projectId) {
+            console.log("Rendering comparison issues for project:", projectId);
+            const container = document.getElementById('diff-issue-list');
+            if (!container) return;
+            
+            fetch('/api/issues')
+            .then(res => res.json())
+            .then(issues => {
+                if (window._issueManager) {
+                    window._issueManager.issues = issues.filter(i => !i.isComparison);
+                }
+                const compIssues = issues.filter(i => i.isComparison === true);
+                window.comparisonIssues = compIssues;
+                
+                const countEl = document.getElementById('comp-issue-count');
+                if (countEl) countEl.textContent = compIssues.length;
+                
+                const structSelect = document.getElementById('filter-col-structure');
+                const workSelect = document.getElementById('filter-col-worktype');
+                const assigneeSelect = document.getElementById('filter-col-assignee');
+                
+                const currentStruct = structSelect ? structSelect.value : "";
+                const currentWork = workSelect ? workSelect.value : "";
+                const currentAssignee = assigneeSelect ? assigneeSelect.value : "";
+                
+                // Keep unique values
+                const structures = [...new Set(compIssues.map(i => i.structureName || i.structure).filter(Boolean))];
+                const workTypes = [...new Set(compIssues.map(i => i.workType || i.work_type).filter(Boolean))];
+                const assignees = [...new Set(compIssues.map(i => i.assignee).filter(Boolean))];
+                
+                if (structSelect) {
+                    structSelect.innerHTML = '<option value="">전체</option>' + structures.map(s => `<option value="${s}">${s}</option>`).join('');
+                    structSelect.value = currentStruct;
+                }
+                if (workSelect) {
+                    workSelect.innerHTML = '<option value="">전체</option>' + workTypes.map(w => `<option value="${w}">${w}</option>`).join('');
+                    workSelect.value = currentWork;
+                }
+                if (assigneeSelect) {
+                    assigneeSelect.innerHTML = '<option value="">전체</option>' + assignees.map(a => `<option value="${a}">${a}</option>`).join('');
+                    assigneeSelect.value = currentAssignee;
+                }
+                
+                let filtered = compIssues;
+                if (currentStruct) {
+                    filtered = filtered.filter(i => (i.structureName || i.structure) === currentStruct);
+                }
+                if (currentWork) {
+                    filtered = filtered.filter(i => (i.workType || i.work_type) === currentWork);
+                }
+                if (currentAssignee) {
+                    filtered = filtered.filter(i => i.assignee === currentAssignee);
+                }
+                
+                if (filtered.length === 0) {
+                    container.innerHTML = `<tr><td colspan="7" style="text-align:center; padding: 30px; color:#94a3b8;">등록된 버전비교 이슈가 없습니다.</td></tr>`;
+                    return;
+                }
+                
+                container.innerHTML = filtered.map(i => {
+                    const dateStr = i.createdAt ? i.createdAt.split('T')[0] : '-';
+                    return `
+                    <tr data-id="${i.id}">
+                        <td class="col-check" style="text-align:center;">
+                            <input type="checkbox" class="comp-issue-check" data-id="${i.id}">
+                        </td>
+                        <td class="col-title" style="cursor:pointer; color:#3b82f6; font-weight:500;" onclick="window.editComparisonIssue(${i.id})">
+                            ${i.title}
+                        </td>
+                        <td>${i.structureName || i.structure || '-'}</td>
+                        <td>${i.workType || i.work_type || '-'}</td>
+                        <td>${i.assignee || '-'}</td>
+                        <td>${dateStr}</td>
+                        <td style="text-align:center;">
+                            <button class="btn-comp-issue-delete" style="background:none; border:none; color:#ef4444; cursor:pointer;" onclick="window.deleteComparisonIssue(${i.id}, event)"><i class="fas fa-trash-alt"></i></button>
+                        </td>
+                    </tr>
+                    `;
+                }).join('');
+            })
+            .catch(err => {
+                console.error("Error rendering comparison issues:", err);
+            });
+        };
+    </script>
 </head>
 
 <body>
     <!-- ── Header ─────────────────────────────────────────────────────────── -->
     <header class="header">
         <div class="header-left">
-            <div class="logo">
+            <div class="logo" onclick="location.href='/'" style="cursor: pointer;">
                 <svg width="28" height="28" viewBox="0 0 32 32" fill="none">
                     <rect width="32" height="32" rx="8" fill="url(#grad1)" />
                     <path d="M8 24L16 8L24 24H8Z" fill="white" opacity="0.9" />
@@ -63,14 +672,8 @@
             </div>
         </div>
         <div class="header-right">
-            <button id="header-dashboard-btn" class="header-map-btn active">
-                <i class="fas fa-chart-pie"></i> 대시보드
-            </button>
-            <button id="header-projects-btn" class="header-map-btn">
+            <button id="header-projects-btn" class="header-map-btn active">
                 <i class="fas fa-list"></i> 프로젝트
-            </button>
-            <button id="header-map-btn" class="header-map-btn">
-                <i class="fas fa-map-marked-alt"></i> 🗺️ 지도
             </button>
             <div class="status-badge" id="status-badge">
                 <span class="status-dot connected"></span>
@@ -113,10 +716,12 @@
         <!-- Resize Handle between sidebar and viewer -->
         <div class="sidebar-resize-handle" id="sidebar-resize-handle"></div>
 
+
+
         <!-- Center: Viewer ──────────────────────────────────────────────── -->
         <section class="viewer-container" id="viewer-container">
             <!-- Explorer Mode (Table View) -->
-            <div id="explorer-container" class="explorer-container" style="display:none;">
+            <div id="explorer-container" class="explorer-container" style="display:flex;">
                 <div class="explorer-header">
                     <div class="breadcrumb-bar" id="explorer-breadcrumb">
                         <span class="breadcrumb-item active">Select a Project/Folder</span>
@@ -149,9 +754,6 @@
                     <button id="viewer-back-btn" class="top-bar-btn" title="Back to Explorer">
                         <i class="fas fa-arrow-left"></i>
                     </button>
-                    <button id="viewer-reset-btn" class="top-bar-btn" title="Reset View">
-                        <i class="fas fa-sync-alt"></i>
-                    </button>
                 </div>
                 <div class="top-bar-center">
                     <div id="viewer-model-name" class="top-bar-title">Model Name</div>
@@ -181,175 +783,9 @@
             <!-- Normal Single Viewer -->
             <div id="preview"></div>
 
-            <!-- Map Panel -->
-            <div id="map-container" style="display:none; width: 100%; height: 100%;"></div>
 
-            <!-- Premium Dashboard Container -->
-            <div id="dashboard-premium-container" class="dashboard-premium" style="display:flex;">
-                <div class="dashboard-premium-header">
-                    <div class="db-title-group">
-                        <h1 class="db-title">Project Overview</h1>
-                        <p class="db-subtitle">현재 진행 중인 프로젝트 현황을 실시간으로 확인하세요.</p>
-                    </div>
-                    <div class="db-actions">
-                        <div class="db-search">
-                            <i class="fas fa-search"></i>
-                            <input type="text" id="db-search-input" placeholder="프로젝트 검색..." />
-                        </div>
-                    </div>
-                </div>
 
-                <div class="db-stats-row">
-                    <div class="db-stat-card">
-                        <div class="stat-icon" style="background: rgba(99, 102, 241, 0.15); color: #6366f1;">
-                            <i class="fas fa-layer-group"></i>
-                        </div>
-                        <div class="stat-info">
-                            <h3>Total Projects</h3>
-                            <div class="stat-val" id="stat-total">0</div>
-                        </div>
-                    </div>
-                    <div class="db-stat-card">
-                        <div class="stat-icon" style="background: rgba(16, 185, 129, 0.15); color: #10b981;">
-                            <i class="fas fa-play"></i>
-                        </div>
-                        <div class="stat-info">
-                            <h3>In Progress</h3>
-                            <div class="stat-val" id="stat-active">0</div>
-                        </div>
-                    </div>
-                    <div class="db-stat-card">
-                        <div class="stat-icon" style="background: rgba(14, 165, 233, 0.15); color: #0ea5e9;">
-                            <i class="fas fa-check-circle"></i>
-                        </div>
-                        <div class="stat-info">
-                            <h3>Completed</h3>
-                            <div class="stat-val" id="stat-completed">0</div>
-                        </div>
-                    </div>
-                    <div class="db-stat-card">
-                        <div class="stat-icon" style="background: rgba(245, 158, 11, 0.15); color: #f59e0b;">
-                            <i class="fas fa-calendar-alt"></i>
-                        </div>
-                        <div class="stat-info">
-                            <h3>Planned</h3>
-                            <div class="stat-val" id="stat-planned">0</div>
-                        </div>
-                    </div>
-                </div>
 
-                <div class="db-grid">
-                    <div class="db-sidebar">
-                        <div class="db-filter-box">
-                            <div class="filter-header"><i class="fas fa-filter"></i> Filters</div>
-                            <div class="filter-group">
-                                <label>카테고리</label>
-                                <select id="filter-category">
-                                    <option value="all">전체</option>
-                                    <option value="건축">건축</option>
-                                    <option value="토목">토목</option>
-                                    <option value="플랜트">플랜트</option>
-                                    <option value="인프라">인프라</option>
-                                </select>
-                            </div>
-                            <div class="filter-group">
-                                <label>위치 (지역)</label>
-                                <select id="filter-location">
-                                    <option value="all">전체 지역</option>
-                                    <option value="서울">서울</option>
-                                    <option value="경기">경기</option>
-                                    <option value="인천">인천</option>
-                                    <option value="부산">부산</option>
-                                    <option value="충청">충청</option>
-                                    <option value="강원">강원</option>
-                                    <option value="해외">해외</option>
-                                </select>
-                            </div>
-                            <div class="filter-group">
-                                <label>진행 상태</label>
-                                <select id="filter-status">
-                                    <option value="all">전체 상태</option>
-                                    <option value="진행중">진행 중</option>
-                                    <option value="완료">완료</option>
-                                    <option value="예정">예정</option>
-                                </select>
-                            </div>
-                        </div>
-                        <div class="db-chart-box">
-                            <h3 class="chart-title">Category Distribution</h3>
-                            <div class="chart-container-sm">
-                                <canvas id="chart-category"></canvas>
-                            </div>
-                        </div>
-                        <div class="db-chart-box">
-                            <h3 class="chart-title">Location Distribution</h3>
-                            <div class="chart-container-sm">
-                                <canvas id="chart-location"></canvas>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="db-content">
-                        <div class="db-controls">
-                            <span class="db-count">검색된 프로젝트: <strong id="db-project-count">0</strong>개</span>
-                            <div class="db-sort">
-                                <select id="sort-projects">
-                                    <option value="newest">최신순</option>
-                                    <option value="name">이름순</option>
-                                    <option value="oldest">오래된순</option>
-                                </select>
-                            </div>
-                        </div>
-                        <div class="db-project-grid" id="db-project-grid"></div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Project Selection Dashboard -->
-            <div id="project-selection-dashboard" class="project-dashboard" style="display:none;">
-                <div class="dashboard-header">
-                    <div class="greeting-section">
-                        <h1 id="user-greeting">사용자님, 환영합니다.</h1>
-                    </div>
-                    <div class="header-right-info">
-                        <div id="dashboard-current-date" class="dashboard-date">2026-03-13 FRIDAY</div>
-                    </div>
-                </div>
-                <div class="dashboard-tabs-container">
-                    <div class="dashboard-tabs">
-                        <button class="tab-btn active" id="tab-projects">프로젝트</button>
-                        <button class="tab-btn">프로젝트 템플릿</button>
-                    </div>
-                </div>
-
-                <div class="dashboard-actions">
-                    <button class="create-project-btn"><i class="fas fa-plus"></i> 프로젝트 만들기</button>
-                    <div class="dashboard-search-box">
-                        <input type="text" id="project-search" placeholder="이름 또는 번호로 프로젝트 검색...">
-                        <i class="fas fa-search"></i>
-                    </div>
-                </div>
-
-                <div class="project-list-container">
-                    <table class="project-table">
-                        <thead>
-                            <tr>
-                                <th>유형</th>
-                                <th>이름</th>
-                                <th>번호</th>
-                                <th>기본 액세스</th>
-                                <th>계정 (Hub)</th>
-                                <th>작성 날짜 <i class="fas fa-arrow-down"></i></th>
-                            </tr>
-                        </thead>
-                        <tbody id="project-list-body">
-                            <tr>
-                                <td colspan="6" class="loading-state">프로젝트 목록을 불러오는 중...</td>
-                            </tr>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
 
             <!-- Comparison Container -->
             <div id="comparison-container" class="comparison-container" style="display:none;">
@@ -371,137 +807,208 @@
                         </div>
                     </div>
                     <div class="compare-actions">
+                        <div class="view-mode-toggle" id="view-mode-toggle">
+                            <button id="btn-view-side" class="toggle-btn active" title="병렬 뷰(Side-by-Side)"><i class="fas fa-columns"></i></button>
+                            <button id="btn-view-overlay" class="toggle-btn" title="중첩 뷰(Overlay)"><i class="fas fa-layer-group"></i></button>
+                        </div>
                         <button class="btn-diff-run" id="run-diff-btn" disabled>Run Comparison</button>
                         <button class="btn-diff-exit" id="exit-compare-btn">Exit Compare</button>
                     </div>
                 </div>
 
-                <div id="diff-export-toolbar" class="diff-export-toolbar" style="display:none;">
-                    <span class="export-label">📊 비교 결과 내보내기:</span>
-                    <div class="excel-dropdown-wrap" id="excel-dropdown-wrap">
-                        <button class="btn-export btn-excel-icon" id="btn-export-excel"
-                            onclick="window.toggleExcelDropdown(event)">
-                            <svg class="excel-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                                stroke-width="2">
-                                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                                <polyline points="14 2 14 8 20 8" />
-                                <line x1="8" y1="13" x2="16" y2="13" />
-                                <line x1="8" y1="17" x2="16" y2="17" />
-                                <polyline points="10 9 9 9 8 9" />
-                            </svg>
-                            Excel ▾
-                        </button>
-                        <ul class="excel-dropdown-menu" id="excel-dropdown-menu">
-                            <li onclick="window.exportDiffExcel(); window.closeExcelDropdown()"><strong>전체 데이터
-                                    내려받기</strong></li>
-                            <li onclick="window.exportFilteredDiffExcel(); window.closeExcelDropdown()"><strong>필터 적용
-                                    데이터 내려받기</strong></li>
-                        </ul>
+                <!-- [NEW] Overlay Controls Panel (Floating UI) -->
+                <div id="overlay-controls-panel" class="overlay-controls-panel" style="display:none;">
+                    <div class="ocp-header">Overlay Controls</div>
+                    <div class="ocp-row">
+                        <span class="ocp-label">Version A:</span>
+                        <div class="ocp-tools">
+                            <button id="btn-toggle-vis-a" class="ocp-btn" title="가시성 토글"><i class="fas fa-eye"></i></button>
+                            <input type="range" id="slider-opacity-a" min="0" max="1" step="0.1" value="1">
+                        </div>
+                    </div>
+                    <div class="ocp-row">
+                        <span class="ocp-label">Version B:</span>
+                        <div class="ocp-tools">
+                            <button id="btn-toggle-vis-b" class="ocp-btn" title="가시성 토글"><i class="fas fa-eye"></i></button>
+                            <input type="range" id="slider-opacity-b" min="0" max="1" step="0.1" value="1">
+                        </div>
+                    </div>
+                </div>
+
+                <!-- [NEW] Comparison Tabs -->
+                <div class="comparison-tabs" id="comparison-tabs" style="display:none; justify-content: space-between; align-items: center; width: 100%;">
+                    <div class="tab-buttons">
+                        <button class="tab-btn active" data-tab="results-tab" onclick="window.forceOpenTab('results-tab', this)">버전 비교</button>
+                        <button class="tab-btn" data-tab="issues-tab" onclick="window.forceOpenTab('issues-tab', this)">버전비교 이슈</button>
                     </div>
 
-                    <div class="pdf-dropdown-wrap" id="pdf-dropdown-wrap">
-                        <button class="btn-export btn-pdf-icon" id="btn-export-pdf"
-                            onclick="window.togglePdfDropdown(event)">
-                            <svg class="pdf-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                                stroke-width="2">
+                    <!-- PDF 내보내기 드롭다운 (기존 btn-export 양식 재사용, 완전히 숨김 또는 예비용) -->
+                    <div class="pdf-dropdown-wrap" id="comp-pdf-dropdown-wrap" style="display: none; margin-bottom: 5px; margin-right: 15px;">
+                        <button class="btn-export btn-pdf-icon" id="btn-comp-export-pdf"
+                            onclick="window.toggleCompPdfDropdown(event)"
+                            title="선택 이슈 PDF 내보내기">
+                            <svg class="pdf-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                 <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
                                 <polyline points="14 2 14 8 20 8" />
                                 <line x1="16" y1="13" x2="8" y2="13" />
                                 <line x1="16" y1="17" x2="8" y2="17" />
                                 <polyline points="10 9 9 9 8 9" />
                             </svg>
-                            PDF ▾
+                            PDF 내보내기 ▾
                         </button>
-                        <ul class="pdf-dropdown-menu" id="pdf-dropdown-menu">
-                            <li class="snapshot-option-row" onclick="event.stopPropagation()">
-                                <label class="snapshot-toggle-label" for="chk-include-snapshots">
-                                    <span class="snapshot-toggle-icon">📸</span>
-                                    <span class="snapshot-toggle-text"><strong>객체 스냅샷 포함</strong></span>
-                                    <span class="snapshot-switch"><input type="checkbox"
-                                            id="chk-include-snapshots" /><span class="snapshot-slider"></span></span>
-                                </label>
-                            </li>
-                            <li onclick="window.exportDiffPdf(); window.closePdfDropdown()"><strong>전체 데이터 내려받기</strong>
-                            </li>
-                            <li onclick="window.exportFilteredDiffPdf(); window.closePdfDropdown()"><strong>필터 적용 데이터
-                                    내려받기</strong></li>
+                        <ul class="pdf-dropdown-menu" id="comp-pdf-dropdown-menu">
+                            <li id="comp-pdf-export-selected" onclick="window.exportComparisonIssuesPdf(false)"><strong>✅ 선택 항목 내보내기</strong></li>
+                            <li id="comp-pdf-export-all" onclick="window.exportComparisonIssuesPdf(true)"><strong>📋 전체 내보내기</strong></li>
                         </ul>
                     </div>
                 </div>
 
-                <div id="diff-filter-toolbar" class="diff-filter-toolbar" style="display:none;">
-                    <span class="filter-label">🔍 카테고리 필터:</span>
-                    <select id="filter-all-categories" class="category-select"
-                        onchange="window.applyDiffFilter('all', this.value)">
-                        <option value="">전체 보기 (All)</option>
-                    </select>
-                </div>
+                <div class="tab-content" id="comparison-tab-content" style="min-height: 350px; height: 350px;">
+                    <!-- Tab 1: 버전 비교 결과 (기존) -->
+                    <div id="results-tab" class="tab-pane active">
+                        <div id="diff-export-toolbar" class="diff-export-toolbar" style="display:none;">
+                            <span class="export-label">📊 비교 결과 내보내기:</span>
+                            <div class="excel-dropdown-wrap" id="excel-dropdown-wrap">
+                                <button class="btn-export btn-excel-icon" id="btn-export-excel"
+                                    onclick="window.toggleExcelDropdown(event)">
+                                    <svg class="excel-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                        stroke-width="2">
+                                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                                        <polyline points="14 2 14 8 20 8" />
+                                        <line x1="8" y1="13" x2="16" y2="13" />
+                                        <line x1="8" y1="17" x2="16" y2="17" />
+                                        <polyline points="10 9 9 9 8 9" />
+                                    </svg>
+                                    Excel ▾
+                                </button>
+                                <ul class="excel-dropdown-menu" id="excel-dropdown-menu">
+                                    <li onclick="window.exportDiffExcel(); window.closeExcelDropdown()"><strong>전체 데이터 내려받기</strong></li>
+                                    <li onclick="window.exportFilteredDiffExcel(); window.closeExcelDropdown()"><strong>필터 적용 데이터 내려받기</strong></li>
+                                </ul>
+                            </div>
 
-                <div class="diff-v-resizer-handle" id="diff-v-resizer-handle">
-                    <div class="v-resizer-knob"></div>
-                </div>
-
-                <div id="diff-results-three-columns" class="diff-results-columns" style="display:none;">
-                    <div class="diff-col added-col">
-                        <div class="diff-col-header">
-                            <div class="toggle-row"><label class="switch"><input type="checkbox" checked
-                                        id="toggle-added"><span class="slider round"></span></label><span
-                                    class="toggle-label">All Added</span></div>
-                            <div class="col-title-bar added-bar">Added Items <span id="count-added-v2">(0)</span></div>
-                        </div>
-                        <div class="diff-col-body">
-                            <table class="diff-table-v2">
-                                <thead>
-                                    <tr>
-                                        <th>name</th>
-                                        <th>category</th>
-                                        <th>level</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="list-added"></tbody>
-                            </table>
-                        </div>
-                    </div>
-                    <div class="diff-col removed-col">
-                        <div class="diff-col-header">
-                            <div class="toggle-row"><label class="switch"><input type="checkbox" checked
-                                        id="toggle-removed"><span class="slider round"></span></label><span
-                                    class="toggle-label">All Removed</span></div>
-                            <div class="col-title-bar removed-bar">Removed Items <span id="count-removed-v2">(0)</span>
+                            <div class="pdf-dropdown-wrap" id="pdf-dropdown-wrap">
+                                <button class="btn-export btn-pdf-icon" id="btn-export-pdf"
+                                    onclick="window.togglePdfDropdown(event)">
+                                    <svg class="pdf-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                        stroke-width="2">
+                                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                                        <polyline points="14 2 14 8 20 8" />
+                                        <line x1="16" y1="13" x2="8" y2="13" />
+                                        <line x1="16" y1="17" x2="8" y2="17" />
+                                        <polyline points="10 9 9 9 8 9" />
+                                    </svg>
+                                    PDF ▾
+                                </button>
+                                <ul class="pdf-dropdown-menu" id="pdf-dropdown-menu">
+                                    <li class="snapshot-option-row" onclick="event.stopPropagation()">
+                                        <label class="snapshot-toggle-label" for="chk-include-snapshots">
+                                            <span class="snapshot-toggle-icon">📸</span>
+                                            <span class="snapshot-toggle-text"><strong>객체 스냅샷 포함</strong></span>
+                                            <span class="snapshot-switch"><input type="checkbox" id="chk-include-snapshots" /><span class="snapshot-slider"></span></span>
+                                        </label>
+                                    </li>
+                                    <li onclick="window.exportDiffPdf(); window.closePdfDropdown()"><strong>전체 데이터 내려받기</strong></li>
+                                    <li onclick="window.exportFilteredDiffPdf(); window.closePdfDropdown()"><strong>필터 적용 데이터 내려받기</strong></li>
+                                </ul>
                             </div>
                         </div>
-                        <div class="diff-col-body">
-                            <table class="diff-table-v2">
-                                <thead>
-                                    <tr>
-                                        <th>name</th>
-                                        <th>category</th>
-                                        <th>level</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="list-removed"></tbody>
-                            </table>
+
+                        <div id="diff-filter-toolbar" class="diff-filter-toolbar" style="display:none;">
+                            <span class="filter-label">🔍 카테고리 필터:</span>
+                            <select id="filter-all-categories" class="category-select" onchange="window.applyDiffFilter('all', this.value)">
+                                <option value="">전체 보기 (All)</option>
+                            </select>
                         </div>
-                    </div>
-                    <div class="diff-col changed-col">
-                        <div class="diff-col-header">
-                            <div class="toggle-row"><label class="switch"><input type="checkbox" checked
-                                        id="toggle-changed"><span class="slider round"></span></label><span
-                                    class="toggle-label">All Changed</span></div>
-                            <div class="col-title-bar changed-bar">Changed Items <span id="count-changed-v2">(0)</span>
+
+                        <!-- [NEW] Horizontal Panel Resizer -->
+                        <div class="resizer-horizontal" id="resizer-h">
+                            <div class="resizer-line"></div>
+                        </div>
+
+                        <div id="diff-results-three-columns" class="diff-results-columns" style="display:none;">
+                            <div class="diff-col added-col">
+                                <div class="diff-col-header">
+                                    <div class="toggle-row"><label class="switch"><input type="checkbox" checked id="toggle-added"><span class="slider round"></span></label><span class="toggle-label">All Added</span></div>
+                                    <div class="col-title-bar added-bar">Added Items <span id="count-added-v2">(0)</span></div>
+                                </div>
+                                <div class="diff-col-body">
+                                    <table class="diff-table-v2">
+                                        <thead><tr><th>name</th><th>category</th><th>level</th></tr></thead>
+                                        <tbody id="list-added"></tbody>
+                                    </table>
+                                </div>
+                            </div>
+                            <div class="diff-col removed-col">
+                                <div class="diff-col-header">
+                                    <div class="toggle-row"><label class="switch"><input type="checkbox" checked id="toggle-removed"><span class="slider round"></span></label><span class="toggle-label">All Removed</span></div>
+                                    <div class="col-title-bar removed-bar">Removed Items <span id="count-removed-v2">(0)</span></div>
+                                </div>
+                                <div class="diff-col-body">
+                                    <table class="diff-table-v2">
+                                        <thead><tr><th>name</th><th>category</th><th>level</th></tr></thead>
+                                        <tbody id="list-removed"></tbody>
+                                    </table>
+                                </div>
+                            </div>
+                            <div class="diff-col changed-col">
+                                <div class="diff-col-header">
+                                    <div class="toggle-row"><label class="switch"><input type="checkbox" checked id="toggle-changed"><span class="slider round"></span></label><span class="toggle-label">All Changed</span></div>
+                                    <div class="col-title-bar changed-bar">Changed Items <span id="count-changed-v2">(0)</span></div>
+                                </div>
+                                <div class="diff-col-body">
+                                    <table class="diff-table-v2">
+                                        <thead><tr><th>name</th><th>category</th><th>level</th><th>changes</th></tr></thead>
+                                        <tbody id="list-changed"></tbody>
+                                    </table>
+                                </div>
                             </div>
                         </div>
-                        <div class="diff-col-body">
-                            <table class="diff-table-v2">
+                    </div>
+
+                    <!-- Tab 2: 버전비교 이슈 -->
+                    <div id="issues-tab" class="tab-pane">
+                        <!-- ── 이슈 탭 상단 툴바 ── -->
+                        <div class="comp-issue-toolbar">
+                            <div class="comp-issue-toolbar-left">
+                                <span class="comp-issue-count-badge"><i class="fas fa-list-ul"></i> <span id="comp-issue-count">0</span>건</span>
+                            </div>
+                        </div>
+                        <div class="diff-issue-container" style="height: calc(350px - 60px) !important; max-height: none !important; overflow-y: auto !important; width: 100%;">
+                            <table class="diff-issue-table" id="diff-issue-table">
                                 <thead>
-                                    <tr>
-                                        <th>name</th>
-                                        <th>category</th>
-                                        <th>level</th>
-                                        <th>changes</th>
+                                    <tr class="header-label-row">
+                                        <th class="col-check" style="width:40px; text-align:center;">
+                                            <input type="checkbox" id="check-all-comp-issues" title="전체 선택/해제" onchange="window.toggleSelectAllCompIssues(this)">
+                                        </th>
+                                        <th class="col-title">
+                                            제목
+                                        </th>
+                                        <th>
+                                            구조물
+                                            <select class="col-filter-select category-select category-select-col" data-col="1" data-col-index="2" id="filter-col-structure" onchange="window.renderComparisonIssues()">
+                                                <option value="">전체</option>
+                                            </select>
+                                        </th>
+                                        <th>
+                                            공종
+                                            <select class="col-filter-select category-select category-select-col" data-col="2" data-col-index="3" id="filter-col-worktype" onchange="window.renderComparisonIssues()">
+                                                <option value="">전체</option>
+                                            </select>
+                                        </th>
+                                        <th>
+                                            작성자
+                                            <select class="col-filter-select category-select category-select-col" data-col="3" data-col-index="4" id="filter-col-assignee" onchange="window.renderComparisonIssues()">
+                                                <option value="">전체</option>
+                                            </select>
+                                        </th>
+                                        <th>작성일</th>
+                                        <th style="width: 100px;">삭제</th>
                                     </tr>
                                 </thead>
-                                <tbody id="list-changed"></tbody>
+                                <tbody id="diff-issue-list">
+                                    <tr><td colspan="7" style="text-align:center; padding: 30px; color:#94a3b8;">등록된 버전비교 이슈가 없습니다.</td></tr>
+                                </tbody>
                             </table>
                         </div>
                     </div>
@@ -577,7 +1084,7 @@
                         placeholder="Problem title..."></div>
                 <div class="form-group"><label>Description</label><textarea id="issue-desc"></textarea></div>
                 <div class="form-row">
-                    <div class="form-group"><label>Assignee</label><input type="text" id="issue-assignee"></div>
+                    <div class="form-group"><label>Assignee</label><select id="issue-assignee"></select></div>
                     <div class="form-group"><label>Status</label><select id="issue-status">
                             <option value="Open">Open</option>
                             <option value="Closed">Closed</option>
@@ -589,12 +1096,100 @@
                     style="display:none; margin-top:15px; padding-top:15px; border-top:1px solid #e2e8f0;">
                     <div class="form-group"><label>Resolution Description</label><textarea
                             id="issue-resolution-desc"></textarea></div>
+                    <div class="form-group" style="text-align:right;">
+                        <button type="button" id="modal-inline-capture-btn"
+                            style="background:#10b981;color:#fff;border:none;padding:6px 12px;border-radius:4px;cursor:pointer;font-weight:bold;"><i
+                                class="fas fa-camera"></i> 현재 시점 캡처하여 저장</button>
+                    </div>
                     <div class="modal-image-preview" id="modal-after-image-preview" style="display:none;"><img
                             id="issue-after-preview-img" src="" /></div>
                 </div>
             </div>
             <div class="modal-footer"><button class="btn-cancel" id="cancel-issue-btn">Cancel</button><button
                     class="btn-save" id="save-issue-btn">Save</button></div>
+        </div>
+    </div>
+
+    <!-- [NEW] Modal: Comparison Issue Dual Capture -->
+    <div id="comparison-issue-popup" class="modal-overlay" style="display:none;">
+        <div class="modal-content" id="comp-issue-modal-content" style="max-width:900px; width:95vw; padding:0; border-radius:8px; overflow:hidden;">
+
+            <!-- 상단 헤더: 모델 이름 + 닫기 -->
+            <div id="comp-issue-header" style="display:flex; align-items:center; justify-content:flex-end; background:#1e3a5f; color:#fff; padding:12px 18px;">
+                <button id="close-comp-issue-modal" onclick="window.forceClosePopup(event)" style="background:none; border:none; color:#fff; font-size:1.2rem; cursor:pointer; line-height:1;">✕</button>
+            </div>
+
+            <!-- 듀얼 컨텐츠 영역 -->
+            <div style="display:grid; grid-template-columns:1fr 1fr; border-bottom:1px solid #cbd5e1;">
+
+                <!-- Version A 컨럼 -->
+                <div style="border-right:1px solid #cbd5e1;">
+                    <!-- 버전 정보 헤더 -->
+                    <div id="comp-version-a-header" style="text-align:center; padding:8px; background:#e8edf2; border-bottom:1px solid #cbd5e1; font-weight:600; font-size:0.9rem; color:#334155;">
+                        Version A (변경 전)
+                    </div>
+                    <!-- 캡쳐 이미지 -->
+                    <div style="background:#f1f5f9; min-height:200px; display:flex; align-items:center; justify-content:center; border-bottom:1px solid #cbd5e1; padding:6px;">
+                        <img id="comp-issue-img-a" src="" style="max-width:100%; max-height:220px; object-fit:contain; display:block;" />
+                    </div>
+                    <!-- 기존 내용 입력 -->
+                    <div style="padding:10px;">
+                        <label style="display:block; font-size:0.8rem; color:#64748b; margin-bottom:4px;">기존 내용 (사용자가 직접 입력)</label>
+                        <textarea id="comp-issue-content-a" rows="4" style="width:100%; box-sizing:border-box; resize:vertical; padding:8px; border:1px solid #cbd5e1; border-radius:4px; font-size:0.9rem; font-family:inherit;" placeholder="기존 문제점을 입력하세요..."></textarea>
+                    </div>
+                </div>
+
+                <!-- Version B 컨럼 -->
+                <div>
+                    <!-- 버전 정보 헤더 -->
+                    <div id="comp-version-b-header" style="text-align:center; padding:8px; background:#e8edf2; border-bottom:1px solid #cbd5e1; font-weight:600; font-size:0.9rem; color:#334155;">
+                        Version B (변경 후)
+                    </div>
+                    <!-- 캡쳐 이미지 -->
+                    <div style="background:#f1f5f9; min-height:200px; display:flex; align-items:center; justify-content:center; border-bottom:1px solid #cbd5e1; padding:6px;">
+                        <img id="comp-issue-img-b" src="" style="max-width:100%; max-height:220px; object-fit:contain; display:block;" />
+                    </div>
+                    <!-- 변경 내용 입력 -->
+                    <div style="padding:10px;">
+                        <label style="display:block; font-size:0.8rem; color:#64748b; margin-bottom:4px;">변경 내용 (사용자가 직접 입력)</label>
+                        <textarea id="comp-issue-content-b" rows="4" style="width:100%; box-sizing:border-box; resize:vertical; padding:8px; border:1px solid #cbd5e1; border-radius:4px; font-size:0.9rem; font-family:inherit;" placeholder="변경된 내용을 입력하세요..."></textarea>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 하단 폼 영역 -->
+            <div style="padding:16px 18px; background:#fff;">
+                <div style="display:grid; grid-template-columns:1fr; gap:12px; margin-bottom:10px;">
+                    <div>
+                        <label style="display:block; font-size:0.82rem; color:#475569; margin-bottom:3px;">제목</label>
+                        <input type="text" id="comp-issue-title" placeholder="이슈 제목..." style="width:100%; box-sizing:border-box; padding:7px 10px; border:1px solid #cbd5e1; border-radius:4px; font-size:0.9rem;">
+                    </div>
+                </div>
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:10px;">
+                    <div>
+                        <label style="display:block; font-size:0.82rem; color:#475569; margin-bottom:3px;">담당자</label>
+                        <select id="comp-issue-assignee" style="width:100%; padding:7px 10px; border:1px solid #cbd5e1; border-radius:4px; font-size:0.9rem;">
+                            <option value="Unassigned">Unassigned</option>
+                            <option value="Manager">Manager</option>
+                            <option value="Engineer">Engineer</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label style="display:block; font-size:0.82rem; color:#475569; margin-bottom:3px;">구조물명</label>
+                        <input type="text" id="comp-issue-structure" style="width:100%; box-sizing:border-box; padding:7px 10px; border:1px solid #cbd5e1; border-radius:4px; font-size:0.9rem;">
+                    </div>
+                </div>
+                <div style="margin-bottom:14px;">
+                    <label style="display:block; font-size:0.82rem; color:#475569; margin-bottom:3px;">작업 구분</label>
+                    <input type="text" id="comp-issue-work-type" style="width:100%; box-sizing:border-box; padding:7px 10px; border:1px solid #cbd5e1; border-radius:4px; font-size:0.9rem;">
+                </div>
+                <!-- 푸터 버튼 -->
+                <div style="display:flex; justify-content:flex-end; gap:10px;">
+                    <button id="cancel-comp-issue-btn" onclick="window.forceClosePopup(event)" class="btn-cancel">Cancel</button>
+                    <button id="save-comp-issue-btn" onclick="window.forceSavePopup(event)" class="btn-save">Save</button>
+                </div>
+            </div>
+
         </div>
     </div>
 
@@ -698,20 +1293,54 @@
     </div>
 
     <div class="toast-container" id="toast-container"></div>
-    <script src="https://cesium.com/downloads/cesiumjs/releases/1.114/Build/Cesium/Cesium.js"></script>
-    <script src="/js/ai-panel.js?v=1.1"></script>
-    <script src="/js/harness-context.js?v=1.0"></script>
-    <script src="/js/harness-action.js?v=1.0"></script>
-    <script src="/js/export-utils.js?v=1.0"></script>
+    <script src="/js/ai-panel.js?v=20260519_v3"></script>
+    <script src="/js/harness-context.js?v=20260519_v3"></script>
+    <script src="/js/harness-action.js?v=20260519_v3"></script>
+    <script src="/js/export-utils.js?v=20260519_v3"></script>
     <!-- explorer.js manages the folder table view -->
-    <script src="/js/explorer.js?v=1.1" type="module"></script>
+    <script src="/js/explorer.js?v=20260519_v3" type="module"></script>
     <!-- Navisworks-style Clash Detective Extension -->
     <script src="/js/NavisClashExtension.js"></script>
-    <script src="/js/dashboard-premium.js?v=1.0" type="module"></script>
     <!-- main.js wires viewer + tree as ES6 module -->
-    <script src="/js/main.js?v=1.1" type="module"></script>
+    <script src="/js/main.js?v=20260519_v3" type="module"></script>
 
     <script>
+        // 뒤로가기 버튼 이벤트 바인딩 (안전장치 포함)
+        document.addEventListener('DOMContentLoaded', function() {
+            const backBtn = document.getElementById('viewer-back-btn');
+            if (backBtn) {
+                backBtn.onclick = function(e) {
+                    e.preventDefault();
+                    console.log("🚀 뒤로가기 버튼 클릭됨: 탐색기로 복귀 시도");
+
+                    // 1. 기존 함수가 존재하면 우선 호출 (실제 존재하는 함수명으로 자동 매핑하세요)
+                    if (window.explorer && typeof window.explorer.handleBackToExplorer === 'function') {
+                        window.explorer.handleBackToExplorer();
+                    } else if (typeof window.closeViewer === 'function') {
+                        window.closeViewer();
+                    } else if (typeof window.showExplorer === 'function') {
+                        window.showExplorer();
+                    } else {
+                        // 2. 함수를 못 찾은 경우 대비 강제 UI 토글 (실제 DOM ID에 맞게 수정 필수)
+                        console.warn("⚠️ 명시적인 닫기 함수를 찾지 못해 강제 UI 토글을 시도합니다.");
+                        const viewerWrap = document.getElementById('preview');
+                        const topBar = document.getElementById('viewer-top-bar');
+                        const compWrap = document.getElementById('comparison-container');
+                        const explorerWrap = document.getElementById('explorer-container');
+                        const sidebarLeft = document.getElementById('sidebar-left');
+                        const btnProjects = document.getElementById('header-projects-btn');
+                        
+                        if (viewerWrap) viewerWrap.style.display = 'none';
+                        if (topBar) topBar.style.display = 'none';
+                        if (compWrap) compWrap.style.display = 'none';
+                        if (explorerWrap) explorerWrap.style.display = 'flex';
+                        if (sidebarLeft) sidebarLeft.style.display = 'flex';
+                        if (btnProjects) btnProjects.classList.add('active');
+                    }
+                };
+            }
+        });
+
         document.addEventListener('DOMContentLoaded', () => {
             const handle = document.getElementById('sidebar-resize-handle');
             const sidebar = document.getElementById('sidebar-left');
@@ -760,7 +1389,7 @@
                     if (chatInput) setTimeout(() => chatInput.focus(), 100);
                 } else {
                     container.style.opacity = '0';
-                  ntainer.style.transform = 'translateY(40px) scale;
+                    container.style.transform = 'translateY(40px) scale(0.95)';
                     setTimeout(() => {
                         container.style.display = 'none';
                     }, 300);

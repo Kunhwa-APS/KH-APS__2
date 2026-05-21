@@ -12,16 +12,47 @@ export function addCustomButtons(viewer) {
 
     // 1. Clash Button is now handled by NavisClashExtension.js
 
-    // 2. Add Issue Button
-    addIssueToolbarButton(viewer, () => {
-        // Use global handle for IssueManager
-        if (window._issueManager) {
-            window._issueManager.toggleCreationMode();
+    // 2. Add Issue Button — 클릭 시: MarkupsCore 활성화 → 이슈 생성 모드 진입
+    addIssueToolbarButton(viewer, (e) => {
+        if (e) {
+            if (e.preventDefault) e.preventDefault();
+            if (e.stopImmediatePropagation) e.stopImmediatePropagation();
+            if (e.stopPropagation) e.stopPropagation();
         }
+        _handleIssueToolClick(viewer);
     });
+
+    // [DOM 직접 이벤트 제거] APS 버튼 onClick과 DOM 리스너가 중복되어 Double-firing 방지
+    const domBtn = document.getElementById('add-issue-tool-btn');
+    if (domBtn) {
+        const clone = domBtn.cloneNode(true);
+        domBtn.parentNode.replaceChild(clone, domBtn);
+        
+        clone.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            _handleIssueToolClick(viewer);
+        });
+    }
 
     console.log('[ToolbarUtils] Custom buttons added to viewer instance.');
 }
+
+/**
+ * [공통 핸들러] 이슈 버튼 클릭 시 실행되는 핵심 로직
+ * 1. MarkupsCore 익스텐션 로드 및 편집 모드 진입
+ * 2. IssueManager.toggleCreationMode() 호출 (캔버스 클릭 → 이슈 생성 플로우 시작)
+ */
+function _handleIssueToolClick(viewer) {
+    console.log("🚨 [Issue Btn Clicked] 위치 선택 모드 진입...");
+
+    if (window._issueManager) {
+        window._issueManager.toggleCreationMode(true);
+    } else {
+        console.warn('[ToolbarUtils] ⚠️ _issueManager가 아직 초기화되지 않았습니다.');
+    }
+}
+
 
 /**
  * Adds a custom button to the viewer toolbar for issue management.

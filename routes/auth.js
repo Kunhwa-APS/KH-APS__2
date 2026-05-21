@@ -8,16 +8,14 @@ let router = express.Router();
  * ngrok / localhost 환경 모두 자동 대응합니다.
  */
 function getDynamicCallbackUrl(req) {
-    const forwardedHost = req.headers['x-forwarded-host'] || req.headers['x-original-host'];
-    const forwardedProto = req.headers['x-forwarded-proto'] || 'http';
+    // With 'trust proxy' set to 1 in server.js, req.protocol and req.get('host') 
+    // will automatically reflect the headers from ngrok (x-forwarded-proto, x-forwarded-host)
+    const protocol = req.protocol;
+    const host = req.get('host');
+    const callbackUrl = `${protocol}://${host}/api/auth/callback`;
 
-    if (forwardedHost) {
-        return `${forwardedProto}://${forwardedHost}/api/auth/callback`;
-    }
-
-    const protocol = req.secure ? 'https' : req.headers['x-forwarded-proto'] || 'http';
-    const host = req.headers.host;
-    return `${protocol}://${host}/api/auth/callback`;
+    console.log(`[Auth] Dynamic Callback URL Generated: ${callbackUrl} (Detected Protocol: ${protocol})`);
+    return callbackUrl;
 }
 
 /**

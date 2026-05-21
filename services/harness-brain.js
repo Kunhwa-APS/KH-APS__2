@@ -56,11 +56,15 @@ const HarnessBrain = {
         let enriched = basePrompt;
 
         if (modelContext) {
-            enriched += `\n\n### 현재 모델 상세\n${JSON.stringify(modelContext, null, 2)}`;
+            const contextStr = (typeof modelContext === 'string')
+                ? modelContext
+                : JSON.stringify(modelContext, null, 2);
+            enriched += `\n\n<MODEL_DATA>\n${contextStr}\n</MODEL_DATA>`;
         }
 
         if (issues && issues.length > 0) {
-            enriched += `\n\n### 연동된 이슈 현황\n${JSON.stringify(issues, null, 2)}`;
+            // 🌟 <ISSUE_DATA> 태그와 JSON 포맷팅 적용
+            enriched += `\n\n<ISSUE_DATA>\n${JSON.stringify(issues, null, 2)}\n</ISSUE_DATA>`;
         }
 
         return enriched;

@@ -29,6 +29,133 @@ class FolderExplorer {
         if (this.backBtn) {
             this.backBtn.onclick = () => this.handleBackToExplorer();
         }
+
+        // Restore context if available, otherwise show projects root
+        const storedHubId = localStorage.getItem('aps_last_hub_id');
+        const storedProjectId = localStorage.getItem('aps_last_project_id');
+        if (storedHubId && storedProjectId) {
+            this.history = [
+                { id: 'projects-root', name: 'Root', type: 'projects-root' }
+            ];
+            this.showFolder(storedHubId, storedProjectId, null, 'Project');
+        } else {
+            this.showRootProjects();
+        }
+    }
+
+    async showRootProjects() {
+        this.currentHubId = null;
+        this.currentProjectId = null;
+        this.currentFolderId = null;
+        this.history = [{ id: 'projects-root', name: 'Root', type: 'projects-root' }];
+        this.updateBreadcrumbs();
+        this.switchMode('explorer');
+        this.renderLoading();
+
+        try {
+            const hubsResponse = await fetch('/api/hubs');
+            if (!hubsResponse.ok) {
+                this.renderError(`서버 오류 (${hubsResponse.status})`);
+                return;
+            }
+            const hubs = await hubsResponse.json();
+            if (!Array.isArray(hubs) || hubs.length === 0) {
+                this.renderError('허브 정보를 찾을 수 없습니다.');
+                return;
+            }
+
+            const projectPromises = hubs.map(async (hub) => {
+                try {
+                    const projectsResponse = await fetch(`/api/hubs/${hub.id}/projects`);
+                    if (projectsResponse.ok) {
+                        const projects = await projectsResponse.json();
+                        return projects.map(p => ({ ...p, hubName: hub.name, hubId: hub.id }));
+                    }
+                } catch (e) {
+                    console.warn(`Failed to fetch projects for hub ${hub.id}:`, e);
+                }
+                return [];
+            });
+
+            const results = await Promise.all(projectPromises);
+            const allProjects = results.flat();
+
+            allProjects.sort((a, b) => new Date(b.created || 0) - new Date(a.created || 0));
+
+            this.renderProjects(allProjects);
+        } catch (err) {
+            console.error('[Explorer] Failed to load projects list:', err);
+            this.renderError('프로젝트 목록을 가져오지 못했습니다.');
+        }
+    }
+
+    async showProjects(hubId, hubName) {
+        this.currentHubId = hubId;
+        this.currentProjectId = null;
+        this.currentFolderId = null;
+        this.history = [
+            { id: 'projects-root', name: 'Root', type: 'projects-root' },
+            { id: hubId, name: hubName, type: 'projects', hubId: hubId }
+        ];
+        this.updateBreadcrumbs();
+        this.switchMode('explorer');
+        this.renderLoading();
+
+        try {
+            const response = await fetch(`/api/hubs/${hubId}/projects`);
+            if (!response.ok) {
+                this.renderError(`서버 오류 (${response.status})`);
+                return;
+            }
+            const projects = await response.json();
+            if (!Array.isArray(projects)) {
+                this.renderError('데이터 형식이 올바르지 않습니다.');
+                return;
+            }
+
+            const mappedProjects = projects.map(p => ({ ...p, hubId }));
+            this.renderProjects(mappedProjects);
+        } catch (err) {
+            console.error('[Explorer] Failed to load projects:', err);
+            this.renderError('프로젝트 정보를 가져오지 못했습니다.');
+        }
+    }
+
+    renderProjects(projects) {
+        if (!projects || projects.length === 0) {
+            this.list.innerHTML = '<tr><td colspan="5" style="text-align:center; padding:40px; color:var(--text-muted);">프로젝트가 존재하지 않습니다.</td></tr>';
+            return;
+        }
+
+        this.list.innerHTML = '';
+        projects.forEach(project => {
+            const tr = document.createElement('tr');
+            tr.className = 'row-project';
+            tr.style.cursor = 'pointer';
+
+            const createdDate = project.created ? new Date(project.created).toLocaleDateString() : '-';
+
+            tr.innerHTML = `
+                <td class="col-name">
+                    <span class="explorer-icon icon-project" style="color: var(--accent-blue); margin-right: 10px;">
+                        <i class="fas fa-project-diagram"></i>
+                    </span>
+                    <span class="item-name" style="font-weight:600;">${project.name}</span>
+                </td>
+                <td class="col-version">-</td>
+                <td class="col-date">${createdDate}</td>
+                <td class="col-user">-</td>
+                <td class="col-actions"></td>
+            `;
+
+            tr.onclick = () => {
+                const finalHubId = project.hubId || this.currentHubId;
+                localStorage.setItem('aps_last_hub_id', finalHubId);
+                localStorage.setItem('aps_last_project_id', project.id);
+                this.showFolder(finalHubId, project.id, null, project.name);
+            };
+            this.list.appendChild(tr);
+        });
     }
 
     async showFolder(hubId, projectId, folderId, folderName = 'Root') {
@@ -36,12 +163,28 @@ class FolderExplorer {
         this.currentProjectId = projectId;
         this.currentFolderId = folderId;
 
-        // Update history for breadcrumbs
-        const lastIdx = this.history.findIndex(h => h.id === folderId);
-        if (lastIdx !== -1) {
-            this.history = this.history.slice(0, lastIdx + 1);
+        // Rebuild history if empty or not containing projects-root
+        const hasRoot = this.history.some(h => h.type === 'projects-root');
+        if (!hasRoot) {
+            this.history = [
+                { id: 'projects-root', name: 'Root', type: 'projects-root' }
+            ];
+        }
+
+        if (!folderId) {
+            const projectsIdx = this.history.findIndex(h => h.type === 'projects');
+            const rootIdx = this.history.findIndex(h => h.type === 'projects-root');
+            const sliceIdx = projectsIdx !== -1 ? projectsIdx : rootIdx;
+
+            this.history = this.history.slice(0, sliceIdx + 1);
+            this.history.push({ id: projectId, name: folderName, type: 'folder', hubId, projectId });
         } else {
-            this.history.push({ id: folderId, name: folderName });
+            const lastIdx = this.history.findIndex(h => h.id === folderId);
+            if (lastIdx !== -1) {
+                this.history = this.history.slice(0, lastIdx + 1);
+            } else {
+                this.history.push({ id: folderId, name: folderName, type: 'folder', hubId, projectId });
+            }
         }
 
         this.updateBreadcrumbs();
@@ -73,29 +216,25 @@ class FolderExplorer {
     }
 
     switchMode(mode) {
-        const dashboard = document.getElementById('project-selection-dashboard');
+        const sidebarLeft = document.getElementById('sidebar-left');
         const topBar = document.getElementById('viewer-top-bar');
+        const btnProjects = document.getElementById('header-projects-btn');
+
+        // Reset all
+        this.container.style.display = 'none';
+        this.viewerContainer.style.display = 'none';
+        if (topBar) topBar.style.display = 'none';
+
+        if (btnProjects) btnProjects.classList.remove('active');
 
         if (mode === 'explorer') {
             this.container.style.display = 'flex';
-            this.viewerContainer.style.display = 'none';
-            if (this.infoBar) this.infoBar.style.display = 'none';
-            if (topBar) topBar.style.display = 'none';
-            if (dashboard) dashboard.style.display = 'none';
+            if (sidebarLeft) sidebarLeft.style.display = 'flex';
+            if (btnProjects) btnProjects.classList.add('active');
         } else if (mode === 'viewer') {
-            this.container.style.display = 'none';
             this.viewerContainer.style.display = 'block';
             if (topBar) topBar.style.display = 'flex';
-            if (dashboard) dashboard.style.display = 'none';
-        } else {
-            this.container.style.display = 'none';
-            this.viewerContainer.style.display = 'block';
-        }
-
-        // Hide comparison container always when switching
-        const comparisonContainer = document.getElementById('comparison-container');
-        if (comparisonContainer) {
-            comparisonContainer.style.display = 'none';
+            if (btnProjects) btnProjects.classList.add('active');
         }
     }
 
@@ -110,7 +249,15 @@ class FolderExplorer {
             const item = document.createElement('span');
             item.className = `breadcrumb-item ${i === this.history.length - 1 ? 'active' : ''}`;
             item.textContent = h.name;
-            item.onclick = () => this.showFolder(this.currentHubId, this.currentProjectId, h.id, h.name);
+            item.onclick = () => {
+                if (h.type === 'hubs') {
+                    this.showHubs();
+                } else if (h.type === 'projects') {
+                    this.showProjects(h.hubId, h.name);
+                } else {
+                    this.showFolder(this.currentHubId, this.currentProjectId, h.id, h.name);
+                }
+            };
 
             this.breadcrumb.appendChild(item);
 
@@ -122,6 +269,7 @@ class FolderExplorer {
             }
         });
     }
+
 
     renderLoading() {
         this.list.innerHTML = '<tr><td colspan="5" style="text-align:center; padding:40px; color:var(--text-muted);">Loading folder contents...</td></tr>';
@@ -363,10 +511,19 @@ class FolderExplorer {
     }
 
     executeCompare(urn1, urn2) {
+        const v1 = (this.currentVersions || []).find(v => v.id === urn1);
+        const v2 = (this.currentVersions || []).find(v => v.id === urn2);
+        const itemName = document.getElementById('version-modal-filename')?.textContent || 'Model';
+
         const raw1 = this.decodeUrn(urn1);
         const raw2 = this.decodeUrn(urn2);
+
+        // 🌟 [Data Extraction] 전역 헬퍼 함수를 사용하여 이름 생성
+        const nameA = v1 ? window.formatBimModelName(itemName, v1.vNumber) : 'Version A';
+        const nameB = v2 ? window.formatBimModelName(itemName, v2.vNumber) : 'Version B';
+
         if (typeof window.compareModels === 'function') {
-            window.compareModels(raw1, raw2);
+            window.compareModels(raw1, raw2, nameA, nameB);
         } else {
             alert('compareModels 함수를 찾을 수 없습니다.');
         }

@@ -5,9 +5,12 @@ const { PORT, SERVER_SESSION_SECRET } = require('./config.js');
 
 let app = express();
 
+// Trust proxy for ngrok/reverse proxy environments
+app.set('trust proxy', 1);
+
 // Middleware for parsing JSON and URL-encoded bodies
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // Static files (using public directory for the integrated app)
 app.use(express.static('public'));
@@ -17,8 +20,10 @@ app.use(session({
     secret: SERVER_SESSION_SECRET,
     resave: false,
     saveUninitialized: false,
+    proxy: true, // Required for secure cookies behind proxy
     cookie: {
         httpOnly: true,
+        secure: 'auto', // Secure if request is https
         maxAge: 24 * 60 * 60 * 1000 // 24 hours
     }
 }));

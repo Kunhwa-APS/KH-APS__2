@@ -8,6 +8,60 @@ const handlebars = require('handlebars');
 // Register Handlebars eq helper for conditional comparisons
 handlebars.registerHelper('eq', (a, b) => a === b);
 
+// GET: Fetch all issues
+router.get('/api/issues', (req, res) => {
+    try {
+        const dataPath = path.join(__dirname, '..', 'data', 'issues.json');
+        if (!fs.existsSync(dataPath)) {
+            return res.json([]);
+        }
+        const data = fs.readFileSync(dataPath, 'utf8');
+        res.json(JSON.parse(data || '[]'));
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to read issues' });
+    }
+});
+
+// POST: Add or Update issue
+router.post('/api/issues', (req, res) => {
+    try {
+        const dataPath = path.join(__dirname, '..', 'data', 'issues.json');
+        const issues = fs.existsSync(dataPath) ? JSON.parse(fs.readFileSync(dataPath, 'utf8') || '[]') : [];
+
+        const newIssue = req.body;
+        const index = issues.findIndex(i => i.id === newIssue.id);
+
+        if (index !== -1) {
+            issues[index] = { ...issues[index], ...newIssue, updatedAt: new Date().toISOString() };
+        } else {
+            issues.push({ ...newIssue, createdAt: new Date().toISOString() });
+        }
+
+        fs.writeFileSync(dataPath, JSON.stringify(issues, null, 2), 'utf8');
+        res.status(201).json(newIssue);
+    } catch (err) {
+        console.error('[Issues API] Save error:', err);
+        res.status(500).json({ error: 'Failed to save issue' });
+    }
+});
+
+// DELETE: Remove issue
+router.delete('/api/issues/:id', (req, res) => {
+    try {
+        const id = parseInt(req.params.id);
+        const dataPath = path.join(__dirname, '..', 'data', 'issues.json');
+        if (!fs.existsSync(dataPath)) return res.status(404).json({ error: 'Not found' });
+
+        let issues = JSON.parse(fs.readFileSync(dataPath, 'utf8') || '[]');
+        issues = issues.filter(i => i.id !== id);
+
+        fs.writeFileSync(dataPath, JSON.stringify(issues, null, 2), 'utf8');
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to delete issue' });
+    }
+});
+
 router.post('/api/issues/export-pdf', async (req, res) => {
     try {
         const data = req.body;
@@ -57,10 +111,14 @@ router.post('/api/issues/export-pdf', async (req, res) => {
                 status: issue.status || 'Open',
                 pdf_structure: valStruct,
                 pdf_work_type: valWork,
-                description: issue.description || '',
-                resolution_description: issue.resolution_description || '',
+                description: issue.description || '내용 없음',
+                resolution_description: issue.resolutionDesc || issue.resolution_description || '내용 없음',
                 thumbnail: issue.thumbnail || '',
-                after_snapshot_url: issue.after_snapshot_url || ''
+                after_snapshot_url: issue.afterThumbnail || issue.after_snapshot_url || '',
+                isDualImage: (issue.isComparison === true || issue.isComparison === 'true') || (issue.status === 'Closed'),
+                versionA: issue.versionA || 'V00',
+                versionB: issue.versionB || 'V00',
+                imageTableRows: issue.imageTableRows || ''
             };
         });
 

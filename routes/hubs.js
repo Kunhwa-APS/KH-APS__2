@@ -175,8 +175,76 @@ router.get('/api/hubs/:hub_id/projects/:project_id/issues', async function (req,
 
         res.json(formattedIssues);
     } catch (err) {
-        console.error('[ACC Issues API] Error:', err.message || err);
-        next(err);
+        // [Fix] ACC Issues 모듈 미지원/토큰 만료 시 500 전파 대신 빈 배열 반환
+        console.warn('[ACC Issues API] 이슈 조회 실패 (빈 배열 반환):', err.message || err);
+        return res.json([]);
+    }
+});
+/**
+ * GET /api/hubs/:hub_id/projects/:project_id/users
+ * 프로젝트 구성원 목록 조회 (HQ Admin API)
+ */
+router.get('/api/hubs/:hub_id/projects/:project_id/users', async function (req, res, next) {
+    try {
+        const hubId = req.params.hub_id;
+        const projectId = req.params.project_id;
+        
+        let twoLeggedToken = null;
+        try {
+            twoLeggedToken = await getInternalTwoLeggedToken();
+        } catch (e) {
+            console.error('[ACC HQ API] Failed to get 2-legged token for users:', e.message);
+            return res.json([]);
+        }
+
+        const accountId = hubId.replace(/^b\./, '');
+        const projId = projectId.replace(/^b\./, '');
+
+        const response = await fetch(`https://developer.api.autodesk.com/hq/v1/accounts/${accountId}/projects/${projId}/users`, {
+            headers: { 'Authorization': `Bearer ${twoLeggedToken}` }
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+            res.json(data);
+        } else {
+            console.warn('[ACC HQ API] Failed to fetch users:', response.statusText);
+            res.json([]);
+        }
+    } catch (err) {
+        console.warn('[ACC HQ API] Exception fetching users:', err.message);
+        res.json([]);
+    }
+});
+/**
+ * GET /api/forge/members
+ * 403 에러 우회를 위한 프론트엔드용 백엔드 프록시 라우트
+ */
+router.get('/api/forge/members', async function (req, res, next) {
+    try {
+        let twoLeggedToken = null;
+        try {
+            twoLeggedToken = await getInternalTwoLeggedToken();
+        } catch (e) {
+            console.error('[ACC Proxy API] 관리자 토큰(2-legged) 획득 실패:', e.message);
+            return res.status(403).json({ error: 'Token missing' });
+        }
+
+        const apiUrl = 'https://developer.api.autodesk.com/construction/admin/v1/projects/374bde3a-83a3-4dd5-80c2-2e01ddeac719/users?limit=200';
+        const response = await fetch(apiUrl, {
+            headers: { 'Authorization': `Bearer ${twoLeggedToken}` }
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+            res.json(data);
+        } else {
+            console.warn('[ACC Proxy API] ACC Admin API 통신 실패:', response.statusText);
+            res.status(response.status).json({ error: response.statusText });
+        }
+    } catch (err) {
+        console.warn('[ACC Proxy API] 내부 오류 발생:', err.message);
+        res.status(500).json({ error: err.message });
     }
 });
 
