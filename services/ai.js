@@ -1,10 +1,16 @@
+/**
+ * AI Service — provider-agnostic facade
+ * -----------------------------------------
+ *  · 어댑터 패턴: openai | gemini | ollama
+ *  · Social-Bypass 모드 (일상 대화 감지)
+ *  · Harness-Brain RAG 선택적 주입
+ */
 'use strict';
 
-const axios = require('axios');
+const { getProvider } = require('./ai-providers');
+const HarnessBrain = require('./harness-brain');
 
-const PROVIDER = () => process.env.AI_PROVIDER || 'gemini';
-
-// ── System Prompt ────────────────────────────────────────────────────────────
+// ── System Prompt ─────────────────────────────────────────────
 const SYSTEM_PROMPT = `당신은 시각형 BIM 모델 데이터와 직접 연결된 **'객체 분류기 및 액션 핸들러(Classifier)'**입니다.
 초기 지침보다 아래의 '실행 규칙'과 '예시'를 최우선으로 따르십시오.
 
@@ -14,7 +20,7 @@ const SYSTEM_PROMPT = `당신은 시각형 BIM 모델 데이터와 직접 연결
 3. **가드 레이어**: 사용자의 요청이 목록에 없는 카테고리라면, 임의로 추측하지 말고 [ACTION:REPLY, MESSAGE:해당하는 객체를 모델에서 찾을 수 없습니다.] 라고 답변하십시오.
 
 ### 🎯 [CRITICAL EXAMPLES]
-현재 카테고리 목록이 ["벽", "바닥", "Pipes"] 일 때:
+현재 카테고리 목록이 ["벽", "바닥", "계단", "Pipes"] 일 때:
 - "바닥 선택" -> [ACTION:SELECT, TARGET:바닥]
 - "바닥 빨간색으로 변경해줘" -> [ACTION:THEME, TARGET:바닥, COLOR:red]
 - "Floor 선택" -> [ACTION:SELECT, TARGET:바닥] (목록에 Floor가 없으므로 가장 유사한 '바닥' 선택)
@@ -37,124 +43,13 @@ const ACTION_TAGS_RULE = `
 
 동작명 목록: SELECT, HIDE, ISOLATE, FOCUS, FLYTO, COUNT, THEME, EXPORT_ISSUES_PDF, RESET_VIEWER`;
 
-// ── OpenAI (GPT) ─────────────────────────────────────────────────────────────
-async function callOpenAI(messages, systemPrompt) {
-    const apiKey = process.env.OPENAI_API_KEY;
-    if (!apiKey) throw new Error('OPENAI_API_KEY not set in .env');
+const SOCIAL_BYPASS_APPEND = `
 
-    const payload = {
-        model: 'gpt-4o-mini',
-        messages: [
-            { role: 'system', content: systemPrompt || SYSTEM_PROMPT },
-            ...messages
-        ],
-        max_tokens: 2048,
-        temperature: 0.3
-    };
-
-    const response = await axios.post(
-        'https://api.openai.com/v1/chat/completions',
-        payload,
-        { headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' } }
-    );
-    return response.data.choices[0].message.content;
-}
-
-// ── Google Gemini ─────────────────────────────────────────────────────────────
-async function callGemini(messages, systemPrompt, retryCount = 0) {
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) throw new Error('GEMINI_API_KEY not set in .env');
-
-    const availableModels = ['gemini-2.0-flash', 'gemini-flash-latest', 'gemini-pro-latest'];
-    const model = availableModels[retryCount] || 'gemini-pro-latest';
-
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-
-    console.log(`[AI] Calling Gemini: ${model} (Attempt: ${retryCount + 1})`);
-
-    const contents = messages.map(m => ({
-        role: m.role === 'assistant' ? 'model' : 'user',
-        parts: [{ text: m.content }]
-    }));
-
-    const payload = {
-        systemInstruction: { parts: [{ text: systemPrompt || SYSTEM_PROMPT }] },
-        contents,
-        generationConfig: { maxOutputTokens: 2048, temperature: 0.3 }
-    };
-
-    try {
-        const response = await axios.post(url, payload, {
-            headers: { 'Content-Type': 'application/json' }
-        });
-
-        const resultText = response.data.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (!resultText) {
-            console.error('[AI] Gemini response missing content:', JSON.stringify(response.data, null, 2));
-            return 'Gemini response was empty or blocked.';
-        }
-        return resultText;
-    } catch (err) {
-        if (err.response) {
-            console.error(`[AI] Gemini API Error (${err.response.status}):`, JSON.stringify(err.response.data, null, 2));
-        } else {
-            console.error('[AI] Gemini Request Error:', err.message);
-        }
-
-        const isRetryable = err.response?.status === 404 || err.response?.status === 429;
-        if (isRetryable && retryCount < 2) {
-            const delay = err.response?.status === 429 ? (Math.pow(2, retryCount) * 1000) : 100;
-            console.warn(`[AI] Error ${err.response?.status}. Retrying with fallback in ${delay}ms...`);
-            await new Promise(resolve => setTimeout(resolve, delay));
-            return callGemini(messages, systemPrompt, retryCount + 1);
-        }
-
-        throw err;
-    }
-}
-
-// ── Ollama (Local LLM) ────────────────────────────────────────────────────────
-async function callOllama(messages, systemPrompt) {
-    const host = process.env.OLLAMA_HOST || 'http://localhost:11434';
-    const model = process.env.OLLAMA_MODEL || 'llama3';
-
-    console.log(`[AI] Calling Ollama: ${model} @ ${host}`);
-
-    try {
-        const { Ollama } = require('ollama');
-        const ollama = new Ollama({ host });
-
-        const response = await ollama.chat({
-            model: model,
-            messages: [
-                { role: 'system', content: systemPrompt || SYSTEM_PROMPT },
-                ...messages
-            ],
-            stream: false
-        });
-
-        return response.message.content;
-    } catch (err) {
-        console.error('[AI] Ollama Error:', err.message);
-        if (err.message.includes('ECONNREFUSED')) {
-            throw new Error(`Ollama connection failed at ${host}. Ensure Ollama is running ('ollama serve').`);
-        }
-        throw err;
-    }
-}
-
-// ── Dispatcher ────────────────────────────────────────────────────────────────
-async function callAI(messages, systemPrompt) {
-    const provider = PROVIDER();
-    console.log(`[AI] Using provider: ${provider}`);
-    if (provider === 'openai') return callOpenAI(messages, systemPrompt);
-    if (provider === 'gemini') return callGemini(messages, systemPrompt);
-    if (provider === 'ollama') return callOllama(messages, systemPrompt);
-    throw new Error(`Unknown AI provider: ${provider}. Set AI_PROVIDER=openai, gemini, or ollama`);
-}
-
-// ── Public API (Multi-turn Chat) ────────────────────────────────────────────────
-const HarnessBrain = require('./harness-brain');
+## [Social-Bypass Mode]
+사용자가 일상적인 대화를 건넸습니다. 당신은 지금 사용자의 '다정하고 유능한 파트너'예요.
+- 전문적인 기능 안내나 거절 문구는 잠시 잊고, 친구와 수다를 떨듯 다정하게 대화에만 집중해 주세요.
+- 사용자가 힘들어하거나 지쳐 보이면 진심 어린 응원과 공감을 최우선으로 해 주세요.
+- 말투는 부드러운 '해요 체'로 유지해 주세요.`;
 
 function isSocialTalk(message) {
     if (!message) return false;
@@ -162,15 +57,56 @@ function isSocialTalk(message) {
     return socialKeywords.some(keyword => message.includes(keyword));
 }
 
+// ── 공통 디스패처 ─────────────────────────────────────────────
+async function callAI(messages, systemPrompt = SYSTEM_PROMPT, options = {}) {
+    const provider = getProvider();
+    console.log(`[ai] provider=${provider.name} messages=${messages.length}`);
+    try {
+        return await provider.chat({ messages, systemPrompt, options });
+    } catch (err) {
+        console.error(`[ai:${provider.name}] error:`, err.response?.data || err.message);
+        throw err;
+    }
+}
+
+// ── Public API ────────────────────────────────────────────────
+
+async function analyzeModel({ modelData, question, context }) {
+    const userMessage = [
+        '## BIM Model Data',
+        modelData ? JSON.stringify(modelData, null, 2) : 'No model data provided',
+        '',
+        '## Additional Context',
+        context || 'None',
+        '',
+        '## Question',
+        question,
+    ].join('\n');
+    return callAI([{ role: 'user', content: userMessage }]);
+}
+
+async function summarizeElements({ elements, urn }) {
+    const userMessage = [
+        'Please analyze and summarize the following BIM model elements.',
+        `Model URN: ${urn || 'unknown'}`,
+        '',
+        'Selected Elements:',
+        JSON.stringify(elements, null, 2),
+        '',
+        'Provide:',
+        '1. A brief summary of the selection',
+        '2. Key properties and their values',
+        '3. Any notable observations',
+    ].join('\n');
+    return callAI([{ role: 'user', content: userMessage }]);
+}
+
 async function chat({ messages, systemContext, issues }) {
     let finalSystemPrompt = SYSTEM_PROMPT;
-    const lastUserMessage = messages[messages.length - 1]?.content || "";
+    const lastUserMessage = messages[messages.length - 1]?.content || '';
 
     if (isSocialTalk(lastUserMessage)) {
-        finalSystemPrompt += `\n\n## [Social-Bypass Mode]
-사용자가 일상적인 대화를 건넸습니다. 당신은 지금 사용자의 '다정하고 유능한 파트너'예요. 
-- 전문적인 기능 안내나 거절 문구는 잠시 잊고, 친구와 수다를 떨듯 다정하게 대화에만 집중해 주세요.
-- 말투는 부드러운 '해요 체'로 유지해 주세요.`;
+        finalSystemPrompt += SOCIAL_BYPASS_APPEND;
     }
 
     try {
@@ -214,7 +150,7 @@ async function chat({ messages, systemContext, issues }) {
             finalSystemPrompt += `\n\n## 사내 표준 지식 (RAG)\n${knowledge}`;
         }
     } catch (brainErr) {
-        console.warn('[AI-Brain] 지식 주입 중 오류 (기본 프롬프트 사용):', brainErr);
+        console.warn('[ai-brain] RAG 주입 실패 (기본 프롬프트 사용):', brainErr.message);
     }
 
     // 🌟 [이슈 데이터 추출 및 출력 필수 규칙] 추가
@@ -248,4 +184,4 @@ async function chat({ messages, systemContext, issues }) {
     return callAI(messages, finalSystemPrompt);
 }
 
-module.exports = { analyzeModel: null, summarizeElements: null, chat };
+module.exports = { analyzeModel, summarizeElements, chat };

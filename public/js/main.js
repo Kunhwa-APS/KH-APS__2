@@ -1,6 +1,8 @@
 /* ============================================================
    main.js — Application Entry Point (ES6 Module)
    ============================================================ */
+
+
 import { initViewer, loadModel, loadModelWithTracking, getSafeUrn } from './viewer.js';
 import { initTree } from './sidebar.js';
 import { runDiff, visualizeDiff, loadVersions, exitCompareMode, showDiffList, addToolbarButton, addExitCompareButton } from './diff-viewer.js';
@@ -210,6 +212,8 @@ async function handleTreeSelection(node) {
 
         // Ensure we switch to viewer mode if we are in explorer mode
         explorer.switchMode('viewer');
+        // 뷰어 진입 시 이슈 마커 토글 표시
+        if (window._showIssueToggle) window._showIssueToggle();
 
         if (document.getElementById('preview').style.display !== 'none') {
             loadModelWithTracking(currentViewer, urn, versionName).then(() => {
@@ -642,13 +646,188 @@ document.addEventListener('DOMContentLoaded', () => {
     } catch (e) {
         console.error("🔥 [DOMContentLoaded] AI Assistant widget binding failed:", e);
     }
-
-    // ── 0순위 탭 전환 가로채기 (HTML Inline onclick으로 대체 완료) ─────────────────
-    // 기존의 JS 기반 이벤트 위임에서 간섭이 발생하여, 
-    // index.html의 인라인 onclick="window.forceOpenTab(...)" 방식으로 이전 완료했습니다.
 });
 
+// ── Tab Management ────────────────────────────────────────────────────────────
+function setupTabs() {
+    const headerMapBtn = document.getElementById('header-map-btn');
+    const headerDashboardBtn = document.getElementById('header-dashboard-btn');
+    const headerProjectsBtn = document.getElementById('header-projects-btn');
+    const tabProjects = document.getElementById('tab-projects');
+    const dashboardLegacy = document.getElementById('project-selection-dashboard');
+    const dashboardPremium = document.getElementById('dashboard-premium-container');
+    const mapContainer = document.getElementById('map-container');
+    const preview = document.getElementById('preview');
+    const explorerContainer = document.getElementById('explorer-container');
+    const comparisonContainer = document.getElementById('comparison-container');
 
+    if (!headerMapBtn || !tabProjects || !headerDashboardBtn || !headerProjectsBtn) return;
+
+    /** 모든 메인 패널을 숨기는 헬퍼 */
+    function hideAllPanels() {
+        if (dashboardPremium) dashboardPremium.style.display = 'none';
+        if (dashboardLegacy) dashboardLegacy.style.display = 'none';
+        if (mapContainer) mapContainer.style.display = 'none';
+        if (preview) preview.style.display = 'none';
+        if (explorerContainer) explorerContainer.style.display = 'none';
+        if (comparisonContainer) comparisonContainer.style.display = 'none';
+        // 이슈 토글 버튼은 뷰어가 아닐 때 숨김
+        const issueToggle = document.getElementById('issue-marker-toggle-wrap');
+        if (issueToggle) issueToggle.style.display = 'none';
+    }
+
+    function showIssueToggle() {
+        const issueToggle = document.getElementById('issue-marker-toggle-wrap');
+        if (issueToggle) issueToggle.style.display = '';
+    }
+    // 전역 노출 (뷰어 모드 진입 시 호출)
+    window._showIssueToggle = showIssueToggle;
+
+    // Premium Dashboard button in Header
+    headerDashboardBtn.onclick = () => {
+        headerMapBtn.classList.remove('active');
+        headerProjectsBtn.classList.remove('active');
+        headerDashboardBtn.classList.add('active');
+
+        hideAllPanels();
+        if (dashboardPremium) dashboardPremium.style.display = 'flex';
+    };
+
+    // Legacy Projects List button in Header
+    headerProjectsBtn.onclick = () => {
+        headerMapBtn.classList.remove('active');
+        headerDashboardBtn.classList.remove('active');
+        headerProjectsBtn.classList.add('active');
+        tabProjects.classList.add('active');
+
+        hideAllPanels();
+        if (dashboardLegacy) dashboardLegacy.style.display = 'flex';
+    };
+
+    // Map button in Header
+    headerMapBtn.onclick = async () => {
+        const isMapVisible = mapContainer.style.display === 'block';
+
+        if (isMapVisible) {
+            // 지도 → 대시보드로 복귀
+            headerMapBtn.classList.remove('active');
+            headerDashboardBtn.classList.add('active');
+            headerProjectsBtn.classList.remove('active');
+
+            hideAllPanels();
+            if (dashboardPremium) dashboardPremium.style.display = 'flex';
+        } else {
+            // 지도로 전환
+            headerDashboardBtn.classList.remove('active');
+            headerProjectsBtn.classList.remove('active');
+            headerMapBtn.classList.add('active');
+
+            hideAllPanels(); // explorer, preview, dashboard 모두 숨김
+            mapContainer.style.display = 'block';
+
+            if (!mapInitialized) {
+                if (mapApiKey) {
+                    try {
+                        await initMap('map-container', mapApiKey);
+                        mapInitialized = true;
+                        await loadHubsOnMap();
+                    } catch (err) {
+                        console.error('Map init error:', err);
+                        hideAllPanels();
+                        headerMapBtn.classList.remove('active');
+                        headerDashboardBtn.classList.add('active');
+                        if (dashboardPremium) dashboardPremium.style.display = 'flex';
+                        alert('지도를 불러오는 중 오류가 발생했습니다: ' + err.message);
+                    }
+                } else {
+                     hideAllPanels();
+                     headerMapBtn.classList.remove('active');
+                     headerDashboardBtn.classList.add('active');
+                     if (dashboardPremium) dashboardPremium.style.display = 'flex';
+                     alert('.env 파일에 VWORLD_API_KEY 설정이 필요합니다.');
+                }
+            } else {
+                setTimeout(() => resizeMap(), 100);
+            }
+        }
+    };
+
+    // Legacy inner tab (just in case it's used inside legacy or sidebars)
+    tabProjects.onclick = () => {
+        headerProjectsBtn.onclick(); // trigger the same logic as header projects btn
+    };
+}
+
+async function loadHubsOnMap() {
+    try {
+        const hubs = await fetch('/api/hubs').then(r => r.json());
+        const allProjects = [];
+
+        for (const hub of hubs) {
+            if (!hub.id) continue;
+            const projects = await fetch(`/api/hubs/${hub.id}/projects`).then(r => r.json());
+
+            for (const p of projects) {
+                let lat = p.latitude ? parseFloat(p.latitude) : null;
+                let lng = p.longitude ? parseFloat(p.longitude) : null;
+                let address = '';
+                let hasRealLocation = !!(lat && lng);
+
+                if (!hasRealLocation) {
+                    const street = [p.addressLine1, p.addressLine2].filter(Boolean).join('');
+                    const candidates = [
+                        [p.stateOrProvince, p.city, street].filter(Boolean).join(' '),
+                        [p.stateOrProvince, p.city, p.addressLine1].filter(Boolean).join(' '),
+                        [p.stateOrProvince, p.city].filter(Boolean).join(' '),
+                        p.postalCode || '',
+                        p.city || '',
+                    ].filter(Boolean);
+
+                    for (const candidate of candidates) {
+                        try {
+                            const params = new URLSearchParams({ address: candidate });
+                            if (candidate === p.postalCode) params.set('postalCode', p.postalCode);
+                            const geo = await fetch(`/api/geocode?${params}`).then(r => r.json());
+                            if (geo.lat && geo.lng) {
+                                lat = geo.lat;
+                                lng = geo.lng;
+                                address = candidate;
+                                hasRealLocation = true;
+                                break;
+                            }
+                        } catch (e) { }
+                    }
+                    if (!hasRealLocation) {
+                        address = candidates[0] || '';
+                    }
+                } else {
+                    address = `${p.city || ''} ${p.stateOrProvince || ''}`.trim();
+                }
+
+                allProjects.push({
+                    id: p.id,
+                    name: p.name,
+                    hubId: hub.id,
+                    hubName: hub.name,
+                    address: address || '주소 미설정',
+                    lat: lat ?? (36.5 + (Math.random() - 0.5) * 2),
+                    lng: lng ?? (127.5 + (Math.random() - 1.5) * 2),
+                    hasRealLocation: !!(lat && lng),
+                });
+            }
+        }
+
+        if (allProjects.length > 0) {
+            addProjectMarkers(allProjects, (project) => {
+                flyToLocation(project.lat, project.lng, 5000);
+            });
+            const firstReal = allProjects.find(p => p.hasRealLocation) || allProjects[0];
+            flyToLocation(firstReal.lat, firstReal.lng, 200000);
+        }
+    } catch (err) {
+        console.warn('Map hub load error:', err.message);
+    }
+}
 
 /**
  * ── Centralized UI Sync Utility ──
