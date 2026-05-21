@@ -685,13 +685,20 @@
             </div>
         </div>
         <div class="header-right">
-            <button id="header-projects-btn" class="header-map-btn active">
+            <button id="header-dashboard-btn" class="header-map-btn active">
+                <i class="fas fa-chart-pie"></i> 대시보드
+            </button>
+            <button id="header-projects-btn" class="header-map-btn">
                 <i class="fas fa-list"></i> 프로젝트
+            </button>
+            <button id="header-map-btn" class="header-map-btn">
+                <i class="fas fa-map-marked-alt"></i> 🗺️ 지도
             </button>
             <div class="status-badge" id="status-badge">
                 <span class="status-dot connected"></span>
                 <span id="status-text">APS Connected</span>
             </div>
+            <!-- login button — initially hidden, shown by main.js -->
             <button class="btn-auth" id="login" style="visibility:hidden;">Login</button>
         </div>
     </header>
