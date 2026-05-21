@@ -70,7 +70,10 @@
     color: var(--text-muted);
 }
 
-.db-search input {
+/* Selector kept more specific than the generic `input[type="text"]` rule in
+   ui-refresh.css (which loads later, same specificity) so the left padding that
+   clears the search icon is never overridden — otherwise text overlaps the icon. */
+.db-search input[type="text"] {
     background: var(--bg-tertiary);
     border: 1px solid var(--border-primary);
     border-radius: var(--radius-md);

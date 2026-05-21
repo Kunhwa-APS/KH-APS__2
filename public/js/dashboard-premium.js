@@ -15,6 +15,11 @@ const MOCK_CATEGORIES = ['도로', '상하수도', '터널', '단지', '교량',
 const MOCK_LOCATIONS = ['서울', '경기', '인천', '부산', '충청', '강원', '해외'];
 const MOCK_STATUSES = ['진행중', '완료', '예정'];
 
+// Canonical region taxonomy & display order — shared by the Location Distribution
+// chart and the Filters dropdown so the two always stay in sync.
+// Must cover every label that mapLocationFromAddress() can return.
+const LOCATION_ORDER = ['서울', '경기', '인천', '전라', '경상', '부산', '충청', '강원', '제주', '해외'];
+
 /**
  * Map ACC HQ `type` (project type) to Korean category.
  * Returns null when type is empty/unknown so caller can fallback.
@@ -211,8 +216,9 @@ export async function renderPremiumDashboard(hubsData, { refresh = false } = {})
 
     filteredProjects = [...allProjectsData];
 
-    // Populate year filter options from available project data
+    // Populate year & location filter options from available project data
     populateYearFilter();
+    populateLocationFilter();
 
     // 3. Initialize UI
     bindFilterEvents();
@@ -229,6 +235,27 @@ function populateYearFilter() {
     // Preserve 'all' option and refill
     sel.innerHTML = '<option value="all">전체 연도</option>' +
         years.map(y => `<option value="${y}">${y}년</option>`).join('');
+}
+
+/**
+ * Populate the location filter from the regions actually present in the data,
+ * using the same canonical taxonomy/order as the Location Distribution chart.
+ * This keeps the Filters dropdown and the chart in sync (no missing/dead regions).
+ */
+function populateLocationFilter() {
+    const sel = document.getElementById('filter-location');
+    if (!sel) return;
+    const prev = sel.value;
+    const present = new Set(allProjectsData.map(p => p.mockLocation).filter(Boolean));
+    // Order by canonical LOCATION_ORDER; append any unexpected labels at the end.
+    const known = LOCATION_ORDER.filter(loc => present.has(loc));
+    const extra = [...present].filter(loc => !LOCATION_ORDER.includes(loc));
+    const locations = [...known, ...extra];
+    // Preserve 'all' option and refill
+    sel.innerHTML = '<option value="all">전체 지역</option>' +
+        locations.map(loc => `<option value="${loc}">${loc}</option>`).join('');
+    // Restore previous selection if still valid
+    if (prev && (prev === 'all' || locations.includes(prev))) sel.value = prev;
 }
 
 /**
@@ -560,11 +587,10 @@ function updateCharts() {
     // 2. Location (small horizontal bar) - top row
     if (ctxLocTop) {
         if (chartLocationTopInstance) chartLocationTopInstance.destroy();
-        // Fixed display order: 서울 > 경기 > 인천 > 충청 > 강원 > 경상 > 전라 > 부산 > 제주 > 해외
-        const LOC_ORDER = ['서울', '경기', '인천', '전라', '경상', '부산', '충청', '강원', '제주', '해외'];
+        // Fixed display order (shared with the Filters dropdown via LOCATION_ORDER)
         const sortedLocs = Object.keys(locData).sort((a, b) => {
-            const ia = LOC_ORDER.indexOf(a);
-            const ib = LOC_ORDER.indexOf(b);
+            const ia = LOCATION_ORDER.indexOf(a);
+            const ib = LOCATION_ORDER.indexOf(b);
             return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib);
         });
         chartLocationTopInstance = new Chart(ctxLocTop.getContext('2d'), {

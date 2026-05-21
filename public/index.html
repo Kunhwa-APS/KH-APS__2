@@ -43,14 +43,14 @@
     <link rel="stylesheet" href="https://cesium.com/downloads/cesiumjs/releases/1.114/Build/Cesium/Widgets/widgets.css">
 
     <!-- Design Tokens & Components -->
-    <link rel="stylesheet" href="/css/design-system.css?v=8" />
+    <link rel="stylesheet" href="/css/design-system.css?v=9" />
 
     <!-- Existing Styles -->
-    <link rel="stylesheet" href="/css/style.css?v=8" />
-    <link rel="stylesheet" href="/css/dashboard-premium.css?v=8" />
+    <link rel="stylesheet" href="/css/style.css?v=9" />
+    <link rel="stylesheet" href="/css/dashboard-premium.css?v=9" />
 
     <!-- UI Refresh Layer (must load last to override) -->
-    <link rel="stylesheet" href="/css/ui-refresh.css?v=8" />
+    <link rel="stylesheet" href="/css/ui-refresh.css?v=9" />
 
     <!-- Three Mesh BVH for Narrow Phase Clash -->
     <script src="https://unpkg.com/three-mesh-bvh@0.7.3/build/index.umd.cjs"></script>
@@ -242,14 +242,20 @@
                         </div>
                         <div class="filter-group">
                             <label>위치 (지역)</label>
+                            <!-- Options are repopulated dynamically from project data
+                                 (populateLocationFilter) to stay in sync with the
+                                 Location Distribution chart. Order matches LOCATION_ORDER. -->
                             <select id="filter-location">
                                 <option value="all">전체 지역</option>
                                 <option value="서울">서울</option>
                                 <option value="경기">경기</option>
                                 <option value="인천">인천</option>
+                                <option value="전라">전라</option>
+                                <option value="경상">경상</option>
                                 <option value="부산">부산</option>
                                 <option value="충청">충청</option>
                                 <option value="강원">강원</option>
+                                <option value="제주">제주</option>
                                 <option value="해외">해외</option>
                             </select>
                         </div>
@@ -967,7 +973,7 @@
     <!-- Navisworks-style Clash Detective Extension -->
     <script src="/js/NavisClashExtension.js"></script>
     <!-- Premium Dashboard Logic -->
-    <script src="/js/dashboard-premium.js?v=1.0" type="module"></script>
+    <script src="/js/dashboard-premium.js?v=1.1" type="module"></script>
     <!-- main.js wires viewer + tree as ES6 module -->
     <script src="/js/main.js?v=20260330_1721" type="module"></script>
 
