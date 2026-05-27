@@ -47,6 +47,10 @@ class FolderExplorer {
         this.currentHubId = null;
         this.currentProjectId = null;
         this.currentFolderId = null;
+        window.activeExplorerProjectId = null;
+        if (window._issueManager && typeof window._issueManager.renderIssueList === 'function') {
+            window._issueManager.renderIssueList();
+        }
         this.history = [{ id: 'projects-root', name: 'Root', type: 'projects-root' }];
         this.updateBreadcrumbs();
         this.switchMode('explorer');
@@ -93,6 +97,10 @@ class FolderExplorer {
         this.currentHubId = hubId;
         this.currentProjectId = null;
         this.currentFolderId = null;
+        window.activeExplorerProjectId = null;
+        if (window._issueManager && typeof window._issueManager.renderIssueList === 'function') {
+            window._issueManager.renderIssueList();
+        }
         this.history = [
             { id: 'projects-root', name: 'Root', type: 'projects-root' },
             { id: hubId, name: hubName, type: 'projects', hubId: hubId }
@@ -162,6 +170,10 @@ class FolderExplorer {
         this.currentHubId = hubId;
         this.currentProjectId = projectId;
         this.currentFolderId = folderId;
+        window.activeExplorerProjectId = projectId;
+        if (window._issueManager && typeof window._issueManager.renderIssueList === 'function') {
+            window._issueManager.renderIssueList();
+        }
 
         // Rebuild history if empty or not containing projects-root
         const hasRoot = this.history.some(h => h.type === 'projects-root');

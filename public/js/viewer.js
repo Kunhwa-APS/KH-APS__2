@@ -836,3 +836,155 @@ async function extractModelSummary(viewer, model) {
     console.log('[Viewer] Final Summary:', summary);
     return summary;
 }
+
+// 지연(Sleep) 헬퍼 함수
+var sleep = function(ms) { return new Promise(resolve => setTimeout(resolve, ms)); };
+
+window.captureViewerSnapshot = function(optViewer) {
+    var viewer = optViewer;
+    if (!viewer) {
+        viewer = window.activeBatchViewer || window.viewerLeft || window.viewer || window.NOP_VIEWER || window._viewer;
+    }
+    if (!viewer || !viewer.canvas) return null;
+    try {
+        return viewer.canvas.toDataURL('image/jpeg', 0.8);
+    } catch (e) {
+        console.error("captureViewerSnapshot failed:", e);
+        return null;
+    }
+};
+
+window.processBatchComparisonIssues = async function(type, items) {
+    var currentViewer = window.viewerLeft || window.viewer || window.NOP_VIEWER || window._viewer;
+    if (type === "추가" && window.viewerRight) {
+        currentViewer = window.viewerRight;
+    }
+    if (!currentViewer) {
+        console.error("No active viewer found for batch comparison issues.");
+        return;
+    }
+
+    // 1. 방어 코드: 최대 30개로 개수 제한 (메모리 폭발 방지)
+    var processList = items;
+    var limitMsg = "";
+    if (items.length > 30) {
+        processList = items.slice(0, 30);
+        limitMsg = " (안전성을 위해 최대 30개까지만 생성됩니다.)";
+    }
+
+    if (typeof displayBotMessage === 'function') {
+        displayBotMessage("🚀 " + processList.length + "개의 항목에 대해 자동 이슈 생성을 시작합니다." + limitMsg + " 잠시만 기다려주세요...");
+    }
+
+    // 전역 캡처 컨텍스트 설정
+    window.activeBatchViewer = currentViewer;
+
+    for (var i = 0; i < processList.length; i++) {
+        var item = processList[i];
+        var dbIds = item.dbIds || [item.dbId];
+
+        if (dbIds && dbIds.length > 0) {
+            // 2. 카메라 이동 및 대기
+            await new Promise(function(resolve) {
+                currentViewer.fitToView(dbIds);
+                currentViewer.addEventListener(Autodesk.Viewing.CAMERA_TRANSITION_COMPLETED, resolve, { once: true });
+                setTimeout(resolve, 2000); // 2초 후 강제 진행 (무한 대기 방지)
+            });
+
+            // 3. 방어 코드: 모델이 선명하게 렌더링될 때까지 1.5초 대기 (흐린 사진 방지)
+            await sleep(1500);
+
+            // 4. 스냅샷 캡처
+            var snapshotBase64 = typeof captureViewerSnapshot === 'function' ? captureViewerSnapshot() : null;
+
+            // 5. 데이터 조립
+            var versionAName = document.getElementById('slot-a-name')?.textContent || 'Version A';
+            var versionBName = document.getElementById('slot-b-name')?.textContent || 'Version B';
+            var structName = "";
+            var wType = "";
+            if (versionAName) {
+                var tokens = versionAName.split('_');
+                if (tokens.length >= 2) {
+                    structName = tokens[0];
+                    wType = tokens[1];
+                }
+            }
+
+            var currentUserName = (window.currentUser && window.currentUser.name) || 
+                                  (window.UserProfile && window.UserProfile.name) || 
+                                  (function() {
+                                      var loginEl = document.getElementById('login');
+                                      if (loginEl && loginEl.innerText && loginEl.innerText.indexOf('Logout') !== -1) {
+                                          var match = loginEl.innerText.match(/Logout \(([^)]+)\)/);
+                                          if (match) return match[1];
+                                      }
+                                      return null;
+                                  })() || 
+                                  "자동 생성 봇";
+
+            var issueData = {
+                id: Date.now() + i,
+                title: "[" + type + "됨] " + (item.name || "알 수 없는 부재"),
+                description: "버전 비교 결과 " + type + "된 항목입니다.",
+                resolutionDesc: "",
+                author: currentUserName,
+                assignee: currentUserName,
+                structureName: structName,
+                workType: wType,
+                dbId: dbIds[0],
+                point: null,
+                thumbnail: snapshotBase64,
+                afterThumbnail: "",
+                beforeImage: snapshotBase64,
+                afterImage: "",
+                versionA: versionAName,
+                versionB: versionBName,
+                urn: window.currentUrn || "",
+                projectId: window.activeExplorerProjectId || window.currentProjectId || (new URLSearchParams(window.location.search)).get('projectId') || "default_project",
+                isComparison: true, // 버전 비교 이슈 플래그
+                snapshotData: snapshotBase64, // Pseudocode compatibility
+                status: "Open"
+            };
+
+            // 6. 서버 API 호출 (Ajax & Fetch Fallback)
+            try {
+                if (typeof $ !== 'undefined' && typeof $.ajax === 'function') {
+                    await $.ajax({
+                        url: '/api/issues', // 🚨 실제 이슈 생성 API 엔드포인트로 맞출 것
+                        method: 'POST',
+                        data: JSON.stringify(issueData),
+                        contentType: 'application/json'
+                    });
+                } else {
+                    var response = await fetch('/api/issues', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(issueData)
+                    });
+                    if (!response.ok) {
+                        throw new Error("HTTP error " + response.status);
+                    }
+                }
+                console.log((i + 1) + "/" + processList.length + " 이슈 생성 완료");
+            } catch (error) {
+                console.error("이슈 생성 실패:", error);
+            }
+
+            // 7. 방어 코드: 서버 DDoS 오인(429 에러) 방지를 위해 요청 간 0.5초 대기
+            await sleep(500);
+        }
+    }
+
+    // 전역 캡처 컨텍스트 해제
+    delete window.activeBatchViewer;
+    
+    if (typeof displayBotMessage === 'function') {
+        displayBotMessage("✅ " + processList.length + "개의 버전 비교 이슈 작성이 완료되었습니다! 이슈 목록을 새로고침하여 확인하세요.");
+    }
+
+    if (typeof window.renderComparisonIssues === 'function') {
+        var projectId = window.currentProjectId || "default_project";
+        window.renderComparisonIssues(projectId);
+    }
+};
+

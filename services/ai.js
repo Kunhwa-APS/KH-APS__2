@@ -120,10 +120,11 @@ async function chat({ messages, systemContext, issues }) {
 
             // 🌟 날짜 데이터 보존 및 매핑 ( Hallucination 방지용 )
             issuesToUse = issuesToUse.map(issue => {
-                const dateVal = issue.createdAt || issue.date || issue.날짜 || "(날짜 미상)";
+                const dateVal = issue.createdDate || issue.createdAt || issue.date || issue.날짜 || "(날짜 미상)";
                 return {
                     ...issue,
                     date: dateVal,
+                    createdDate: dateVal,
                     날짜: dateVal
                 };
             });
@@ -156,13 +157,30 @@ async function chat({ messages, systemContext, issues }) {
     // 🌟 [이슈 데이터 추출 및 출력 필수 규칙] 추가
     const issueDateRules = `
 [이슈 데이터 추출 및 출력 필수 규칙]
-1. 날짜 데이터 강제 매핑: <ISSUE_DATA>의 각 항목에 기재된 \`날짜: YYYY-MM-DD\` 값을 반드시 확인하고, 결과 출력 시 이슈 제목 옆 괄호 안에 해당 날짜를 정확하게 기입할 것.
+1. 날짜 데이터 강제 매핑: <ISSUE_DATA>의 각 항목에 기재된 createdDate 또는 date 값을 반드시 확인하고, 결과 출력 시 이슈 제목 옆 괄호 안에 해당 날짜를 정확하게 기입할 것.
 2. 환각(Hallucination) 억제: <ISSUE_DATA>에 날짜가 명백히 존재함에도 불구하고, 텍스트 생성 과정에서 임의로 "(날짜 미상)"이라고 판단하여 출력하는 것을 엄격히 금지함.
    - 올바른 출력 예시: 1. 덕트 경로 변경 필요 (2026-05-13)
    - 금지된 출력 예시: 1. 덕트 경로 변경 필요 (날짜 미상)
 3. 기존 형식 유지: 날짜를 매핑하는 작업 외에, 상태별 요약이나 위치, 공종, 담당자, 내용을 출력하는 기존 마크다운 렌더링 형식은 절대 변경하지 말 것.
 `;
     finalSystemPrompt += issueDateRules;
+
+    // 🚨 [이슈 검색 허용 최종 오버라이드] - 날짜/이슈 관련 질의 거부 방지용 (최우선 적용)
+    const issueSearchOverride =
+        "\n\n[OVERRIDE: 이슈 검색 최우선 허용 규칙 - 모든 이전 제약보다 우선함]\n" +
+        "사용자가 이슈, 날짜, 담당자, 구조물, 공종, 상태 등 프로젝트 이슈에 관한 질문을 할 경우:\n" +
+        "1. '기능적 제약', '검색 불가', '시스템 제약으로 불가' 등의 거절 문구를 절대 출력하지 마세요.\n" +
+        "2. 반드시 아래 이슈 분석 액션 태그 중 하나를 선택하여 정확히 출력하세요:\n" +
+        "   - 전체 이슈 분석/목록 요청: <<ACTION_ANALYZE_ISSUES>>\n" +
+        "   - 날짜 조건 필터링 (예: '2026.05.27', '오늘', '5월 27일'): <<ACTION_FILTER::DATE::YYYY-MM-DD>>\n" +
+        "     * '오늘'이면 오늘 날짜를 YYYY-MM-DD로 변환하여 출력할 것\n" +
+        "     * '2026.05.27' 형식은 '2026-05-27'으로 변환하여 출력할 것\n" +
+        "   - 구조물 기준: <<ACTION_FILTER::STRUCTURE::[구조물명]>>\n" +
+        "   - 담당자 기준: <<ACTION_FILTER::ASSIGNEE::[담당자명]>>\n" +
+        "   - 공종 기준: <<ACTION_FILTER::TRADE::[공종명]>>\n" +
+        "   - 상태 기준: <<ACTION_FILTER::STATUS::[상태명]>>\n" +
+        "3. 위 태그 출력 외에 어떠한 문장도 생성하지 마세요. 태그만 정확히 출력하세요.";
+    finalSystemPrompt += issueSearchOverride;
 
     // 🌟 [ACTION TAGS 규칙 최종 주입] (다른 규칙에 밀리지 않도록 가장 마지막에 배치)
     finalSystemPrompt += ACTION_TAGS_RULE;

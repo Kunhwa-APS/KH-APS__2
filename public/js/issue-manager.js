@@ -539,11 +539,16 @@ export class IssueManager {
 
         try {
             // 🌟 Autodesk에 직접 가지 않고, 우리 백엔드 프록시 서버에 요청!
-            const response = await fetch('/api/forge/members'); 
+            const projectId = window.currentProjectId || '';
+            const hubId = window.currentHubId || '';
+            const response = await fetch(`/api/auth/profile?projectId=${projectId}&hubId=${hubId}`); 
             if (!response.ok) throw new Error('백엔드 프록시 통신 실패');
 
             const data = await response.json();
-            const memberList = data.results || data.users || (Array.isArray(data) ? data : []);
+            console.log("🕵️‍♂️ 서버가 보내준 멤버 데이터 원본:", data);
+
+            // 데이터 파싱 방어 로직 (객체 형태의 프로필 대응 및 다양한 필드 지원)
+            const memberList = data.results || data.users || data.data || data.items || data.result || (Array.isArray(data) ? data : (data.name ? [data] : []));
 
             if (memberList.length === 0) {
                 assigneeSelect.innerHTML = '<option value="">등록된 프로젝트 구성원이 없습니다</option>';
@@ -552,7 +557,7 @@ export class IssueManager {
 
             assigneeSelect.innerHTML = '<option value="">담당자 선택</option>'; 
             memberList.forEach(user => {
-                const memberName = user.name || user.userName; 
+                const memberName = user.name || user.nickname || user.userName || '알 수 없음'; 
                 if (memberName) {
                     const option = document.createElement('option');
                     option.value = memberName;
@@ -592,6 +597,35 @@ export class IssueManager {
     }
 
     async enterMarkupMode(dbId, point, mode = 'create') {
+        // [Measure Tool Guard] 측정 도구가 활성화되어 있는 경우 마크업 그리기 모드를 우회하여 측정이 해제되지 않도록 방지
+        const measureExt = this.viewer.getExtension('Autodesk.Measure');
+        const isMeasureActive = measureExt && (
+            (typeof measureExt.isActive === 'function' && measureExt.isActive()) ||
+            (this.viewer.toolController && this.viewer.toolController.getActiveTool() === 'measure')
+        );
+
+        if (isMeasureActive) {
+            console.log("📏 [Measure Tool Active] 측정 도구가 활성화되어 있어 마크업 편집 모드를 건너뛰고 캡처를 진행합니다.");
+            this.captureIssueThumbnail((b64) => {
+                const modal = document.getElementById('issue-modal');
+                if (mode === 'create') {
+                    this.showCreateModal(dbId, point, b64);
+                } else if (modal) {
+                    modal.dataset.afterThumbnail = b64;
+                    const prev = document.getElementById('issue-after-preview-img');
+                    if (prev) {
+                        prev.src = b64;
+                        const afterPreviewContainer = document.getElementById('modal-after-image-preview');
+                        if (afterPreviewContainer) {
+                            afterPreviewContainer.style.display = 'flex';
+                        }
+                    }
+                    modal.style.display = 'flex';
+                }
+            }, null);
+            return;
+        }
+
         // [Guard] 툴바 버튼 클릭으로 이미 마크업이 활성화된 경우 중복 로드 방지
         if (!this.markupsExt) {
             this.markupsExt = await this.viewer.loadExtension('Autodesk.Viewing.MarkupsCore');
@@ -823,13 +857,77 @@ export class IssueManager {
     }
 
     renderIssueList() {
-        const container = document.getElementById('issue-list-container');
+        const container = document.getElementById(' issue-list-container') || document.getElementById('issue-list-container') || document.querySelector('.issue-list-container');
         if (!container) return;
-        if (this.issues.length === 0) {
+
+        // 활성화된 프로젝트 ID 추론 로직 (이슈 렌더링 함수 내부)
+        var urlParams = new URLSearchParams(window.location.search);
+        var currentPid = urlParams.get('projectId') || urlParams.get('id');
+        
+        if (!currentPid) {
+            var activeFolder = document.querySelector('.project-folder.active, .tree-node.selected, .project-item.active, .jstree-clicked');
+            if (activeFolder) {
+                currentPid = activeFolder.getAttribute('data-project-id') || 
+                             activeFolder.getAttribute('data-id') || 
+                             activeFolder.getAttribute('data-urn') ||
+                             activeFolder.id;
+            }
+        }
+        
+        // 기존 전역 변수 및 Explorer 활성 변수가 있다면 최우선 사용
+        currentPid = window.activeExplorerProjectId || window.currentProjectId || currentPid;
+
+        // jstree의 node ID 포맷(예: project|hubId|projectId) 대응 파싱
+        if (currentPid && typeof currentPid === 'string' && currentPid.indexOf('|') !== -1) {
+            var tokens = currentPid.split('|');
+            if (tokens.length > 2) {
+                currentPid = tokens[2];
+            }
+        }
+
+        // 대시보드가 활성화되어 있다면 필터링을 적용하지 않음 (모든 이슈 표시)
+        const dashboardPremium = document.getElementById('dashboard-premium-container');
+        const dashboardLegacy = document.getElementById('project-selection-dashboard');
+        const isDashboardActive = (dashboardPremium && dashboardPremium.style.display !== 'none' && dashboardPremium.style.display !== '') || 
+                                  (dashboardLegacy && dashboardLegacy.style.display !== 'none' && dashboardLegacy.style.display !== '');
+        
+        if (isDashboardActive) {
+            currentPid = null;
+        }
+
+        var allIssues = this.issues || [];
+        var filteredIssues = allIssues;
+
+        console.log("Current PID:", currentPid, "Active Explorer PID:", window.activeExplorerProjectId, "Sample Issue:", allIssues[0]);
+
+        if (currentPid && allIssues.length > 0) {
+            filteredIssues = allIssues.filter(function(issue) {
+                var issuePid = issue.projectId || issue.project_id || issue.folderId; 
+                
+                // projectId가 아예 없는 예전 데이터면 우선 숨김 처리
+                if (!issuePid) return false;
+
+                return String(issuePid) === String(currentPid);
+            });
+        }
+
+        // 속성 매칭 실패로 억울하게 다 날아간 경우 원본 복구 (개발 중 안전장치)
+        if (currentPid && filteredIssues.length === 0 && allIssues.length > 0) {
+            console.warn("필터링된 결과가 0건입니다. 매칭 키를 확인하세요. 임시로 전체를 표시합니다.");
+            filteredIssues = allIssues; 
+        }
+
+        // [Fix] 우측 패널 상단의 이슈 개수 요소 안전하게 업데이트
+        var countSpan = document.getElementById(' issue-count') || document.getElementById('issue-count') || document.querySelector('.issue-count');
+        if (countSpan) {
+            countSpan.innerText = filteredIssues.length;
+        }
+
+        if (filteredIssues.length === 0) {
             container.innerHTML = '<div class="issue-empty-state"><p>등록된 이슈가 없습니다.</p></div>';
             return;
         }
-        const sorted = [...this.issues].sort((a, b) => b.id - a.id);
+        const sorted = [...filteredIssues].sort((a, b) => b.id - a.id);
 
         // [DEBUG] 이슈 데이터 구조 확인 - 썸네일 키 파악용
         if (sorted.length > 0) {
@@ -843,17 +941,34 @@ export class IssueManager {
             if (typeof unreadManager !== 'undefined' && unreadManager && typeof unreadManager.isUnread === 'function') {
                 try { isUnread = unreadManager.isUnread(i.id); } catch (e) { }
             }
+
+            const isComparison = !!i.isComparison;
+            const badgeHtml = isComparison 
+                ? `<span class="issue-comp-badge" style="background:#dc2626; color:#fff; font-size:10px; padding:2px 6px; border-radius:4px; font-weight:bold; margin-right:6px; display:inline-block; vertical-align:middle;">VS</span>`
+                : '';
+            const versionHtml = isComparison && (i.versionA || i.versionB)
+                ? `<span style="font-size:11px; color:#f87171; margin-left:6px;">(v${i.versionA} ↔ v${i.versionB})</span>`
+                : '';
+
             return `
                 <div class="issue-item ${isUnread ? 'unread' : ''}" data-id="${i.id}">
                     <div class="issue-item-main">
                         <label class="issue-check-wrap" onclick="event.stopPropagation()">
                             <input type="checkbox" class="issue-check" data-id="${i.id}">
                         </label>
-                        <img src="${i.thumbnail || i.afterThumbnail || ''}" class="issue-thumbnail" onerror="this.style.visibility='hidden'">
+                        ${isComparison && i.thumbnail && i.afterThumbnail ? `
+                            <div class="issue-thumbnail" style="display:flex; padding:0; overflow:hidden; background:#000;">
+                                <img src="${i.thumbnail}" style="width:50%; height:100%; object-fit:cover;">
+                                <img src="${i.afterThumbnail}" style="width:50%; height:100%; object-fit:cover; border-left:1px solid rgba(255,255,255,0.2);">
+                            </div>
+                        ` : `
+                            <img src="${i.thumbnail || i.afterThumbnail || ''}" class="issue-thumbnail" onerror="this.style.visibility='hidden'">
+                        `}
                         <div class="issue-info">
                             <div class="issue-item-header">
                                 <span class="issue-status-badge ${i.status.toLowerCase()}">${i.status}</span>
-                                <span class="issue-item-title">${i.title}</span>
+                                ${badgeHtml}
+                                <span class="issue-item-title">${i.title}${versionHtml}</span>
                                 <div class="issue-item-actions">
                                     ${(i.status || '').toLowerCase() === 'closed' ? `<button class="issue-btn-pdf" title="Export PDF">📄</button>` : ''}
                                     ${(i.status || '').toLowerCase() === 'closed' ? `<button class="issue-btn-resolve" title="해결 상태 캡처"><i class="fas fa-camera"></i></button>` : ''}
@@ -921,13 +1036,39 @@ export class IssueManager {
             const issue = this.issues.find(i => i.id === issueId);
             this.exportPayload = issue ? [issue] : [];
         } else {
+            var rawIssues = this.issues || [];
+            var exportTargetIssues = rawIssues;
+            var currentPid = window.activeExplorerProjectId || window.currentProjectId || (new URLSearchParams(window.location.search)).get('projectId');
+
+            const dashboardPremium = document.getElementById('dashboard-premium-container');
+            const dashboardLegacy = document.getElementById('project-selection-dashboard');
+            const isDashboardActive = (dashboardPremium && dashboardPremium.style.display !== 'none' && dashboardPremium.style.display !== '') || 
+                                      (dashboardLegacy && dashboardLegacy.style.display !== 'none' && dashboardLegacy.style.display !== '');
+            
+            if (isDashboardActive) {
+                currentPid = null;
+            }
+
+            if (currentPid) {
+                exportTargetIssues = rawIssues.filter(function(issue) {
+                    var issuePid = issue.projectId || issue.project_id || issue.folderId;
+                    if (!issuePid) return false;
+                    return String(issuePid) === String(currentPid);
+                });
+            }
+
             const checkedNodes = [...document.querySelectorAll('.issue-check:checked')];
             if (checkedNodes.length > 0) {
                 const ids = checkedNodes.map(n => parseInt(n.dataset.id));
-                this.exportPayload = this.issues.filter(i => ids.includes(i.id));
+                this.exportPayload = exportTargetIssues.filter(i => ids.includes(i.id));
             } else {
-                this.exportPayload = [...this.issues];
+                this.exportPayload = [...exportTargetIssues];
             }
+        }
+
+        if (this.exportPayload.length === 0) {
+            alert('내보낼 이슈가 없습니다.');
+            return;
         }
 
         this.setupPdfModalListeners();
@@ -1192,30 +1333,7 @@ export class IssueManager {
         btn.dataset.bound = '1';
 
         btn.onclick = () => {
-            const checked = [...document.querySelectorAll('.issue-check:checked')];
-            let targetIssues;
-            if (checked.length > 0) {
-                const ids = checked.map(c => parseInt(c.dataset.id));
-                targetIssues = this.issues.filter(i => ids.includes(i.id));
-            } else {
-                targetIssues = [...this.issues];
-            }
-
-            if (targetIssues.length === 0) {
-                alert('내보낼 이슈가 없습니다.');
-                return;
-            }
-
-            const modal = document.getElementById('pdf-export-modal');
-            if (!modal) return;
-
-            // [Fix] Store directly on instance, not in dataset
-            this.exportPayload = [...targetIssues];
-            modal.dataset.issueId = '';
-
-            this.setupPdfModalListeners();
-            this._populatePdfItemList();
-            modal.style.display = 'flex';
+            this.openPdfExportModal();
         };
     }
 }
@@ -1264,3 +1382,21 @@ function safelyInjectIssueTime(existingIssueData = null) {
         console.warn("[UI 주입 무시됨] 코어 기능은 정상 작동합니다.", error);
     }
 }
+
+// 🚨 [Direct General Project Issue PDF Export Helper]
+window.exportProjectIssuesPdf = async function(issuesToExport) {
+    if (window._issueManager) {
+        var sf = { no: true, structure: true, work_type: true, description: true, resolution: true, screenshot: true };
+        var targetList = Array.isArray(issuesToExport) ? issuesToExport : null;
+        if (!targetList) {
+            targetList = [...window._issueManager.issues];
+        }
+        if (targetList.length === 0) {
+            alert("내보낼 이슈 데이터가 없습니다.");
+            return;
+        }
+        await window._issueManager.exportToPdf(targetList, sf);
+    } else {
+        console.error("일반 프로젝트 이슈 매니저를 찾을 수 없습니다.");
+    }
+};

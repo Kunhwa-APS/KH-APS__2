@@ -12,6 +12,7 @@ const {
     authCallbackMiddleware,
     authRefreshMiddleware,
     getUserProfile,
+    getInternalTwoLeggedToken,
 } = require('../services/aps.js');
 const { asyncHandler } = require('../middleware');
 
@@ -71,8 +72,64 @@ router.get('/api/auth/token', authRefreshMiddleware, (req, res) => {
 
 // ── GET /api/auth/profile ──────────────────────────────────────
 router.get('/api/auth/profile', authRefreshMiddleware, asyncHandler(async (req, res) => {
-    const profile = await getUserProfile(req.internalOAuthToken.access_token);
-    res.json({ name: profile.name });
+    const { projectId, hubId } = req.query;
+    if (projectId) {
+        const token = req.internalOAuthToken.access_token;
+        const cleanProjectId = projectId.replace(/^b\./, '');
+        const accountId = (hubId || '').replace(/^b\./, '');
+
+        let users = null;
+
+        // 1. Try ACC Admin Users API first (typically returned as { results: [...] })
+        try {
+            const accUrl = `https://developer.api.autodesk.com/construction/admin/v1/projects/${cleanProjectId}/users`;
+            console.log(`[Auth Profile] Fetching ACC users from: ${accUrl}`);
+            const response = await fetch(accUrl, {
+                headers: { Authorization: `Bearer ${token}` }
+            });
+            if (response.ok) {
+                users = await response.json();
+                console.log('[Auth Profile] Successfully fetched users from ACC API');
+            } else {
+                const errText = await response.text();
+                console.warn(`[Auth Profile] ACC users API failed: ${response.status} - ${errText}`);
+            }
+        } catch (err) {
+            console.warn('[Auth Profile] ACC users API exception:', err.message);
+        }
+
+        // 2. Try BIM 360 HQ Users API as fallback (typically returned as a direct array)
+        if (!users && accountId) {
+            try {
+                const hqUrl = `https://developer.api.autodesk.com/hq/v1/accounts/${accountId}/projects/${cleanProjectId}/users`;
+                console.log(`[Auth Profile] Fetching BIM 360 HQ users from: ${hqUrl}`);
+                const response = await fetch(hqUrl, {
+                    headers: { Authorization: `Bearer ${token}` }
+                });
+                if (response.ok) {
+                    users = await response.json();
+                    console.log('[Auth Profile] Successfully fetched users from BIM 360 HQ API');
+                } else {
+                    const errText = await response.text();
+                    console.warn(`[Auth Profile] BIM 360 HQ users API failed: ${response.status} - ${errText}`);
+                }
+            } catch (err) {
+                console.warn('[Auth Profile] BIM 360 HQ users API exception:', err.message);
+            }
+        }
+
+        if (users) {
+            res.json(users);
+        } else {
+            // Fallback: Return logged-in user profile wrapped in an array on error/not found
+            console.log('[Auth Profile] All user APIs failed. Falling back to current profile.');
+            const profile = await getUserProfile(token);
+            res.json([profile]);
+        }
+    } else {
+        const profile = await getUserProfile(req.internalOAuthToken.access_token);
+        res.json({ name: profile.name });
+    }
 }));
 
 // ── GET /api/config/maps ───────────────────────────────────────

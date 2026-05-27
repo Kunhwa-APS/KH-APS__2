@@ -495,6 +495,8 @@ export async function runDiff(projectId, prevUrn, curUrn, region, onProgress) {
     if (onProgress) onProgress(100);
 
     currentDiffData = { added, removed, changed };
+    window.currentDiffData = currentDiffData;
+    window.comparisonData = currentDiffData;
     return currentDiffData;
 }
 
@@ -614,6 +616,30 @@ function updateResultsPanel(results) {
     const comparisonTabs = document.getElementById('comparison-tabs');
     if (comparisonTabs) comparisonTabs.style.display = 'flex';
 
+    // Ensure active tab is reset to results-tab and PDF dropdown wrap is hidden
+    const pdfWrap = document.getElementById('comp-pdf-dropdown-wrap');
+    if (pdfWrap) pdfWrap.style.setProperty('display', 'none', 'important');
+
+    const tabs = document.querySelectorAll('#comparison-tabs .tab-btn');
+    tabs.forEach(t => {
+        if (t.getAttribute('data-tab') === 'results-tab') {
+            t.classList.add('active');
+        } else {
+            t.classList.remove('active');
+        }
+    });
+
+    const panes = document.querySelectorAll('#comparison-tab-content .tab-pane');
+    panes.forEach(p => {
+        if (p.id === 'results-tab') {
+            p.classList.add('active');
+            p.style.setProperty('display', 'flex', 'important');
+        } else {
+            p.classList.remove('active');
+            p.style.setProperty('display', 'none', 'important');
+        }
+    });
+
     // Show export & filter toolbars
     const exportBar = document.getElementById('diff-export-toolbar');
     if (exportBar) exportBar.style.display = 'flex';
@@ -686,16 +712,16 @@ function populateTable(type, list, tbodyId) {
             const changesHtml = (obj.diffs || []).join('<br>');
             const changesText = (obj.diffs || []).join('\n').replace(/<b>/g, '').replace(/<\/b>/g, '');
             tr.innerHTML = `
-                <td><div class="table-name" title="${obj.name}">${obj.name || 'Unknown'}</div></td>
+                <td><div class="table-name" title="${obj.name}" style="color: #333333 !important;">${obj.name || 'Unknown'}</div></td>
                 <td><span class="category-pill">${obj.category || 'Element'}</span></td>
-                <td><span class="level-info">${obj.level || '-'}</span></td>
+                <td><span class="level-info" style="color: #333333 !important;">${obj.level || '-'}</span></td>
                 <td><div class="table-changes" title="${changesText}">${changesHtml}</div></td>
             `;
         } else {
             tr.innerHTML = `
-                <td><div class="table-name" title="${obj.name}">${obj.name || 'Unknown'}</div></td>
+                <td><div class="table-name" title="${obj.name}" style="color: #333333 !important;">${obj.name || 'Unknown'}</div></td>
                 <td><span class="category-pill">${obj.category || 'Element'}</span></td>
-                <td><span class="level-info">${obj.level || '-'}</span></td>
+                <td><span class="level-info" style="color: #333333 !important;">${obj.level || '-'}</span></td>
             `;
         }
 

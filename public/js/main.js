@@ -55,7 +55,9 @@ try {
 
     if (isLogged) {
         const user = await resp.json();
-        login.innerText = `Logout (${user.name})`;
+        window.currentUser = user;
+        window.UserProfile = user;
+        login.innerText = "Logout (" + user.name + ")";
         login.onclick = () => { logout(); };
         login.style.visibility = 'visible';
 
@@ -142,7 +144,15 @@ try {
             if (window.explorer) window.explorer.handleBackToExplorer();
         };
         document.getElementById('viewer-reset-btn').onclick = () => {
-            if (window._viewer) window._viewer.setViewFromFile();
+            if (window._viewer) {
+                window._viewer.setViewFromFile();
+                if (window._viewer.clearSelection) {
+                    window._viewer.clearSelection();
+                }
+                if (window._viewer.clearThemingColors) {
+                    window._viewer.clearThemingColors();
+                }
+            }
         };
 
     } else {
@@ -649,7 +659,7 @@ function setupIssueModal() {
     }
 
     // Capture After Snapshot Logic (Integrates Markup Tools)
-    const captureAfterBtn = document.getElementById('issue-capture-after-btn');
+    const captureAfterBtn = document.getElementById('modal-inline-capture-btn');
     if (captureAfterBtn) {
         captureAfterBtn.onclick = () => {
             if (issueManager) {
@@ -728,6 +738,11 @@ function setupIssueModal() {
             }
         }
 
+        var currentPid = window.activeExplorerProjectId || 
+                         window.currentProjectId || 
+                         (new URLSearchParams(window.location.search)).get('projectId') || 
+                         null;
+
         const issueData = {
             title,
             description: desc,
@@ -738,7 +753,8 @@ function setupIssueModal() {
             afterViewstate,
             structureName,
             workType,
-            issueNumber
+            issueNumber,
+            projectId: currentPid
         };
 
         try {
@@ -854,6 +870,11 @@ function setupTabs() {
 
         // 위 4개 버튼 중 하나라도 클릭되지 않았으면 무시
         if (!clickedDashboard && !clickedProjects && !clickedMap && !clickedTabProjects) return;
+
+        window.activeExplorerProjectId = null;
+        if (window._issueManager && typeof window._issueManager.renderIssueList === 'function') {
+            window._issueManager.renderIssueList();
+        }
 
         // 버튼 상태 변경을 위해 최신 DOM 요소 조회
         const dBtn = document.getElementById('header-dashboard-btn');

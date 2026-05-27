@@ -1,4 +1,4 @@
-﻿/* ============================================================
+/* ============================================================
    ai-panel.js — AI Chat Panel Logic
    ============================================================ */
 'use strict';
@@ -173,7 +173,20 @@ const AIPanel = (() => {
         const div = document.createElement('div');
         div.className = `chat-bubble ${isError ? 'error' : role}`;
 
-        const formatted = content
+        var safeContent = content;
+
+        // 🚨 [JSON 출력 방어] LLM이 JSON 또는 액션 태그를 그대로 출력한 경우 삸이턱어 지우기
+        if (safeContent.indexOf('"action"') > -1 || safeContent.indexOf('ISSUE_QUERY') > -1) {
+            // JSON 블록 전체를 제거 ('{' ~ '}' 범위의 텍스트)
+            safeContent = safeContent.replace(/\{[\s\S]*?"action"[\s\S]*?\}/gi, '').trim();
+            if (!safeContent || safeContent.length < 5) {
+                safeContent = '항목을 확인했습니다. 자세한 결과는 우측 프로젝트 이슈 패널을 참고해 주세요.';
+            }
+        }
+        // 🚨 [남은 <<ACTION_...>> 태그 제거]
+        safeContent = safeContent.replace(/<<ACTION[A-Z_:]+[^>]*>>/gi, '').trim();
+
+        const formatted = safeContent
             .replace(/\[(?:COMMAND|ACTION)\s*:\s*[^\]]+\]/gi, '') // Hide all ACTION tag formats
             .replace(/```json\s*[\s\S]*?```/gi, '') // Hide JSON blocks
             .replace(/```([\s\S]*?)```/g, '<pre>$1</pre>')
@@ -195,6 +208,10 @@ const AIPanel = (() => {
         return div;
     }
 
+    window.displayBotMessage = function(content) {
+        addBubble('assistant', content);
+    };
+
     function showTyping() {
         const container = elements.chatMessages;
         if (!container) return;
@@ -213,6 +230,504 @@ const AIPanel = (() => {
 
     async function sendMessage(text, isSystemGenerated = false) {
         if (!text.trim() || isLoading) return;
+
+        // 🚨 [Direct Issue Analysis/Statistics Command Interceptor]
+        const isAnalysisRequest = /이슈.*(분석|요약|통계)/i.test(text);
+        if (isAnalysisRequest && !isSystemGenerated) {
+            const isVersionCompare = text.includes("버전비교") || text.includes("버전 비교");
+            const issueTypeLabel = isVersionCompare ? "버전 비교 이슈" : "일반 프로젝트 이슈";
+
+            console.log(`🤖 챗봇 명령 인식: [${issueTypeLabel}] 분석/통계 브리핑 실행`);
+
+            // Add user bubble and clear input field
+            addBubble('user', text);
+            chatHistory.push({ role: 'user', content: text });
+            elements.chatInput.value = '';
+            autoResizeTextarea();
+
+            // Set loading and disable send
+            isLoading = true;
+            setSendEnabled(false);
+            showTyping();
+
+            setTimeout(async () => {
+                try {
+                    let allIssues = [];
+                    try {
+                        const response = await fetch('/api/issues');
+                        if (response.ok) {
+                            const issues = await response.json();
+                            if (window._issueManager) {
+                                window._issueManager.issues = issues.filter(i => !i.isComparison);
+                            }
+                            window.comparisonIssues = issues.filter(i => i.isComparison === true);
+                            allIssues = issues;
+                        }
+                    } catch (fetchErr) {
+                        console.warn('[Chat-Analyze] Fetch issues failed, falling back to local memory & DOM:', fetchErr);
+                    }
+
+                    if (allIssues.length === 0) {
+                        allIssues = [
+                            ...(window._issueManager?.issues || []),
+                            ...(window.comparisonIssues || [])
+                        ];
+                    }
+
+                    let targetIssues = [];
+                    if (isVersionCompare) {
+                        targetIssues = allIssues.filter(issue => issue.isComparison === true);
+                    } else {
+                        targetIssues = allIssues.filter(issue => !issue.isComparison);
+                    }
+
+                    // DOM Fallback parsing if still empty
+                    if (isVersionCompare && targetIssues.length === 0) {
+                        const rows = document.querySelectorAll('#diff-issue-list tr[data-id]');
+                        if (rows && rows.length > 0) {
+                            targetIssues = Array.from(rows).map(row => {
+                                const id = parseInt(row.getAttribute('data-id'));
+                                const title = row.querySelector('.col-title')?.textContent?.trim() || '';
+                                const tds = row.querySelectorAll('td');
+                                const structureName = tds[2]?.textContent?.trim() || '';
+                                const workType = tds[3]?.textContent?.trim() || '';
+                                const assignee = tds[4]?.textContent?.trim() || '';
+                                const dateStr = tds[5]?.textContent?.trim() || '';
+                                return {
+                                    id,
+                                    title,
+                                    structureName,
+                                    workType,
+                                    assignee,
+                                    createdAt: dateStr !== '-' ? dateStr : undefined,
+                                    isComparison: true
+                                };
+                            });
+                        }
+                    } else if (!isVersionCompare && targetIssues.length === 0) {
+                        const rows = document.querySelectorAll('#issue-list-container .issue-item[data-id]');
+                        if (rows && rows.length > 0) {
+                            targetIssues = Array.from(rows).map(row => {
+                                const id = parseInt(row.getAttribute('data-id'));
+                                const title = row.querySelector('.issue-item-title')?.textContent?.trim() || '';
+                                const description = row.querySelector('.issue-item-desc')?.textContent?.trim() || '';
+                                const statusEl = row.querySelector('.issue-status-badge');
+                                const status = statusEl ? statusEl.textContent.trim() : 'Open';
+                                return {
+                                    id,
+                                    title,
+                                    description,
+                                    status,
+                                    isComparison: false
+                                };
+                            });
+                        }
+                    }
+
+                    // 🌟 [Hooking] 현재 프로젝트가 활성화되어 있으면 해당 프로젝트의 이슈만 분석
+                    var currentPid = window.activeExplorerProjectId || window.currentProjectId || (new URLSearchParams(window.location.search)).get('projectId');
+                    const dashboardPremium = document.getElementById('dashboard-premium-container');
+                    const dashboardLegacy = document.getElementById('project-selection-dashboard');
+                    const isDashboardActive = (dashboardPremium && dashboardPremium.style.display !== 'none' && dashboardPremium.style.display !== '') || 
+                                              (dashboardLegacy && dashboardLegacy.style.display !== 'none' && dashboardLegacy.style.display !== '');
+                    if (isDashboardActive) {
+                        currentPid = null;
+                    }
+                    if (currentPid) {
+                        targetIssues = targetIssues.filter(function(issue) {
+                            var issuePid = issue.projectId || issue.project_id || issue.folderId;
+                            if (!issuePid) return false;
+                            return String(issuePid) === String(currentPid);
+                        });
+                    }
+
+                    if (targetIssues.length === 0) {
+                        hideTyping();
+                        const noDataText = `⚠️ 현재 분석할 수 있는 [${issueTypeLabel}] 데이터가 없습니다.`;
+                        if (typeof addBubble === 'function') {
+                            addBubble('assistant', noDataText);
+                        } else if (typeof displayBotMessage === 'function') {
+                            displayBotMessage(noDataText);
+                        }
+                        return;
+                    }
+
+                    // 총 이슈 개수
+                    const totalCount = targetIssues.length;
+
+                    // 구조물별 집계
+                    const structureCounts = {};
+                    // 공종별 집계
+                    const workTypeCounts = {};
+                    // 날짜별 집계
+                    const dateCounts = {};
+
+                    targetIssues.forEach(issue => {
+                        // 구조물명
+                        const struct = issue.structureName || issue.structure || '미지정';
+                        structureCounts[struct] = (structureCounts[struct] || 0) + 1;
+
+                        // 공종명
+                        const wType = issue.workType || issue.work_type || '미지정';
+                        workTypeCounts[wType] = (workTypeCounts[wType] || 0) + 1;
+
+                        // 날짜
+                        let dateVal = '미지정';
+                        if (issue.createdAt) {
+                            dateVal = issue.createdAt.split('T')[0];
+                        } else if (issue.id && issue.id > 1000000000000) {
+                            try {
+                                dateVal = new Date(issue.id).toISOString().split('T')[0];
+                            } catch (e) {}
+                        }
+                        dateCounts[dateVal] = (dateCounts[dateVal] || 0) + 1;
+                    });
+
+                    // 최다 항목 찾기 헬퍼
+                    const getMostFrequent = (countsObj) => {
+                        let maxKey = '미지정';
+                        let maxVal = 0;
+                        for (const [key, val] of Object.entries(countsObj)) {
+                            if (val > maxVal) {
+                                maxVal = val;
+                                maxKey = key;
+                            }
+                        }
+                        return { key: maxKey, count: maxVal };
+                    };
+
+                    const mostStruct = getMostFrequent(structureCounts);
+                    const mostWorkType = getMostFrequent(workTypeCounts);
+                    const mostDate = getMostFrequent(dateCounts);
+
+                    // 구조물별 표 행(tr) 생성
+                    var structureRows = "";
+                    var structArray = Object.entries(structureCounts).sort((a,b) => b[1] - a[1]);
+                    structArray.forEach(function(item) {
+                        structureRows += "<tr>" +
+                            "<td style='padding:6px; border:1px solid #ddd; color:#333333;'>" + item[0] + "</td>" +
+                            "<td style='padding:6px; border:1px solid #ddd; text-align:center; font-weight:bold; color:#2563eb;'>" + item[1] + "건</td>" +
+                        "</tr>";
+                    });
+
+                    // 공종별 표 행(tr) 생성
+                    var workTypeRows = "";
+                    var workArray = Object.entries(workTypeCounts).sort((a,b) => b[1] - a[1]);
+                    workArray.forEach(function(item) {
+                        workTypeRows += "<tr>" +
+                            "<td style='padding:6px; border:1px solid #ddd; color:#333333;'>" + item[0] + "</td>" +
+                            "<td style='padding:6px; border:1px solid #ddd; text-align:center; font-weight:bold; color:#16a34a;'>" + item[1] + "건</td>" +
+                        "</tr>";
+                    });
+
+                    var tableTemplate = "<hr style='margin:15px 0; border:0; border-top:1px dashed #ccc;'>" +
+                    "<p style='margin-bottom:8px; font-weight:bold;'>🏢 구조물별 상세 현황</p>" +
+                    "<table style='width:100%; border-collapse:collapse; margin-bottom:15px; font-size:0.85rem;'>" +
+                        "<tr style='background:#f8fafc;'><th style='padding:6px; border:1px solid #ddd; color:#333333;'>구조물명</th><th style='padding:6px; border:1px solid #ddd; width:70px; color:#333333;'>이슈건수</th></tr>" +
+                        structureRows +
+                    "</table>" +
+                    "<p style='margin-bottom:8px; font-weight:bold;'>🛠️ 공종별 상세 현황</p>" +
+                    "<table style='width:100%; border-collapse:collapse; font-size:0.85rem;'>" +
+                        "<tr style='background:#f8fafc;'><th style='padding:6px; border:1px solid #ddd; color:#333333;'>공종명</th><th style='padding:6px; border:1px solid #ddd; width:70px; color:#333333;'>이슈건수</th></tr>" +
+                        workTypeRows +
+                    "</table>";
+
+                    var htmlResponse = "📊 <strong>현재 프로젝트의 [" + issueTypeLabel + "] 분석 결과입니다.</strong><br>" +
+                        "- <strong>총 발생 이슈:</strong> " + totalCount + "건<br>" +
+                        "- <strong>최다 발생 구조물:</strong> " + mostStruct.key + " (" + mostStruct.count + "건)<br>" +
+                        "- <strong>최다 발생 공종:</strong> " + mostWorkType.key + " (" + mostWorkType.count + "건)<br>" +
+                        "- <strong>이슈 집중 발생일:</strong> " + mostDate.key + " (" + mostDate.count + "건)" +
+                        tableTemplate;
+
+                    hideTyping();
+                    if (typeof addBubble === 'function') {
+                        addBubble('assistant', htmlResponse);
+                    } else if (typeof displayBotMessage === 'function') {
+                        displayBotMessage(htmlResponse);
+                    }
+                } catch (err) {
+                    console.error('[Chat-Analyze Error]', err);
+                    hideTyping();
+                    const errText = `⚠️ 이슈 분석 중 오류 발생: ${err.message}`;
+                    if (typeof addBubble === 'function') {
+                        addBubble('error', errText, true);
+                    } else if (typeof displayBotMessage === 'function') {
+                        displayBotMessage(errText);
+                    }
+                } finally {
+                    isLoading = false;
+                    setSendEnabled(true);
+                }
+            }, 800); // 약간의 딜레이로 실시간 분석 느낌을 줍니다.
+            return;
+        }
+
+        // 🚨 [Batch Auto Issue Creation from Compare Data Interceptor]
+        var batchIssueMatch = text.match(/(추가|제거|변경)된\s*(?:아이템|항목|객체|사항)?\s*이슈(?:로|를)?\s*(?:등록|추가|생성|일괄\s*등록|자동\s*등록|작성)/i);
+        if (batchIssueMatch && !isSystemGenerated) {
+            var targetType = batchIssueMatch[1]; // "추가", "제거", "변경" 중 하나
+            
+            // Add user bubble and clear input field
+            addBubble('user', text);
+            chatHistory.push({ role: 'user', content: text });
+            elements.chatInput.value = '';
+            autoResizeTextarea();
+
+            // 실제 비교 결과 데이터가 들어있는 변수
+            var compData = window.comparisonData || window.currentDiffData || (window._issueManager && window._issueManager.comparisonData) || {};
+            var targetArray = [];
+
+            if (targetType === "추가") {
+                targetArray = compData.added || [];
+            } else if (targetType === "제거") {
+                targetArray = compData.removed || [];
+            } else if (targetType === "변경") {
+                targetArray = compData.changed || [];
+            }
+
+            if (targetArray.length === 0) {
+                var noDataMsg = "⚠️ 현재 모델에 " + targetType + "된 아이템이 없습니다.";
+                addBubble('assistant', noDataMsg);
+                return;
+            }
+
+            // 백그라운드 프로세서 실행
+            if (typeof window.processBatchComparisonIssues === 'function') {
+                window.processBatchComparisonIssues(targetType, targetArray);
+            } else {
+                console.error("window.processBatchComparisonIssues function not found");
+                var errMessage = "⚠️ 일괄 이슈 등록 프로세서가 준비되지 않았습니다.";
+                addBubble('assistant', errMessage);
+            }
+            return;
+        }
+
+        // 🚨 [Direct Auto Issue Creation from Compare Data Interceptor]
+        var autoIssueMatch = text.match(/(추가|제거|변경)된\s*(?:아이템|항목|객체|사항)?\s*.*이슈.*(?:추가|등록|작성)/i);
+        if (autoIssueMatch && !isSystemGenerated) {
+            var targetType = autoIssueMatch[1]; // "추가", "제거", "변경" 중 하나
+            
+            // Add user bubble and clear input field
+            addBubble('user', text);
+            chatHistory.push({ role: 'user', content: text });
+            elements.chatInput.value = '';
+            autoResizeTextarea();
+
+            // 실제 비교 결과 데이터가 들어있는 변수
+            var compData = window.comparisonData || window.currentDiffData || (window._issueManager && window._issueManager.comparisonData) || {};
+            var targetArray = [];
+            var titlePrefix = "";
+
+            if (targetType === "추가") {
+                targetArray = compData.added || [];
+                titlePrefix = "[버전비교] 추가된 아이템 목록";
+            } else if (targetType === "제거") {
+                targetArray = compData.removed || [];
+                titlePrefix = "[버전비교] 제거된 아이템 목록";
+            } else if (targetType === "변경") {
+                targetArray = compData.changed || [];
+                titlePrefix = "[버전비교] 변경된 아이템 목록";
+            }
+
+            if (targetArray.length === 0) {
+                var noDataMsg = "⚠️ 현재 모델에 " + targetType + "된 아이템이 없습니다.";
+                if (typeof displayBotMessage === 'function') {
+                    displayBotMessage(noDataMsg);
+                } else if (typeof addBubble === 'function') {
+                    addBubble('assistant', noDataMsg);
+                }
+                return;
+            }
+
+            // 이슈 내용(Body) 문자열 조립
+            var issueBody = "다음은 " + targetType + "된 항목 리스트입니다.\n\n";
+            targetArray.forEach(function(item) {
+                var itemName = item.name || item.title || "알 수 없는 객체";
+                issueBody += "- " + itemName + "\n";
+            });
+
+            // 팝업 띄우기 (기존에 존재하는 UI 오픈 함수 호출)
+            if (window._issueManager && typeof window._issueManager.showCreateModal === 'function') {
+                window._issueManager.showCreateModal(null, null, null);
+            } else {
+                var modal = document.getElementById('issue-modal') || document.getElementById('comp-issue-popup');
+                if (modal) modal.style.display = 'flex';
+            }
+
+            // 실제 폼 ID 찾아서 값 주입
+            var titleInput = document.getElementById('issue-title') || document.querySelector('input[name="title"]');
+            var contentInput = document.getElementById('issue-desc') || document.getElementById('issue-content') || document.querySelector('textarea[name="content"]');
+
+            if (titleInput) titleInput.value = titlePrefix;
+            if (contentInput) contentInput.value = issueBody;
+
+            var successMsg = "✍️ " + targetType + "된 항목 데이터를 모아서 이슈 작성 창을 열었습니다. 내용을 확인하고 저장해주세요.";
+            if (typeof displayBotMessage === 'function') {
+                displayBotMessage(successMsg);
+            } else if (typeof addBubble === 'function') {
+                addBubble('assistant', successMsg);
+            }
+            return;
+        }
+
+        // 🚨 [Direct Filtered PDF Export Command Interceptor]
+        var filterPdfMatch = text.match(/([가-힣a-zA-Z0-9_]+)\s*(?:이슈만|이슈를|이슈|공종|구조물)?\s*.*pdf.*(?:내보내|뽑아|다운)/i);
+
+        if (filterPdfMatch && !isSystemGenerated) {
+            var keyword = filterPdfMatch[1].trim();
+            var isVersionCompare = text.includes("버전비교") || text.includes("버전 비교");
+            
+            // "버전비교", "프로젝트" 등의 단어가 키워드로 잡히면 필터링을 생략하고 전체 출력으로 간주
+            var skipFilterWords = ["전체", "총", "모든", "버전비교", "버전", "비교", "프로젝트"];
+            var shouldSkipFilter = skipFilterWords.includes(keyword);
+
+            // Add user bubble and clear input field
+            addBubble('user', text);
+            chatHistory.push({ role: 'user', content: text });
+            elements.chatInput.value = '';
+            autoResizeTextarea();
+
+            var sourceIssues = isVersionCompare 
+                ? (window.comparisonIssues || (window._issueManager && window._issueManager.comparisonIssues) || window.versionIssues || []) 
+                : (window.issues || (window._issueManager && window._issueManager.issues) || []);
+            
+            var filtered = sourceIssues;
+            
+            // 전체 출력이 아닌 특정 구조물/공종 필터링일 경우에만 실행
+            if (!shouldSkipFilter) {
+                filtered = sourceIssues.filter(function(issue) {
+                    var sName = issue.structureName || issue.structure_name || "";
+                    var wType = issue.workType || issue.work_type || "";
+                    return sName.includes(keyword) || wType.includes(keyword);
+                });
+                
+                if (filtered.length === 0) {
+                    var failMsg = "🔍 '" + keyword + "' 관련 데이터가 없어 PDF를 생성할 수 없습니다.";
+                    if (typeof displayBotMessage === 'function') {
+                        displayBotMessage(failMsg);
+                    } else if (typeof addBubble === 'function') {
+                        addBubble('assistant', failMsg);
+                    }
+                    return;
+                }
+            }
+
+            var issueTypeLabel = isVersionCompare ? "버전 비교 이슈" : "일반 프로젝트 이슈";
+            var msg = shouldSkipFilter 
+                ? "📄 전체 [" + issueTypeLabel + "] PDF 보고서 출력을 시작합니다." 
+                : "📄 [" + keyword + "] 관련 " + issueTypeLabel + " " + filtered.length + "건을 필터링하여 PDF 보고서 출력을 시작합니다.";
+                
+            if (typeof displayBotMessage === 'function') {
+                displayBotMessage(msg);
+            } else if (typeof addBubble === 'function') {
+                addBubble('assistant', msg);
+            }
+
+            // 🚨 이슈 종류에 따라 각각 알맞은 PDF 내보내기 함수를 분리 호출
+            if (isVersionCompare) {
+                if (typeof window.exportComparisonIssuesPdf === 'function') {
+                    window.exportComparisonIssuesPdf(shouldSkipFilter ? true : filtered);
+                }
+            } else {
+                // 일반 프로젝트 이슈 PDF 생성 함수 (실제 코드의 함수명으로 교체할 것)
+                var normalExportFunc = window.exportProjectIssuesPdf || window.exportIssuesPdf || window.exportPdf || null;
+                if (typeof normalExportFunc === 'function') {
+                    normalExportFunc(shouldSkipFilter ? null : filtered);
+                } else {
+                    console.error("일반 프로젝트 이슈 PDF 내보내기 함수를 찾을 수 없습니다.");
+                }
+            }
+            return;
+        }
+
+        // 🚨 [Direct Version Compare Command Interceptor]
+        const compareRegex = /(.+?)\s*파일의\s*v(\d+)\s*(?:과|와|및|,)\s*v(\d+)\s*(?:을|를)?\s*비교해줘/i;
+        const compareMatch = text.match(compareRegex);
+        if (compareMatch && !isSystemGenerated) {
+            const fileName = compareMatch[1].trim();
+            const versionA = parseInt(compareMatch[2], 10);
+            const versionB = parseInt(compareMatch[3], 10);
+
+            console.log(`🤖 챗봇 명령 인식: [${fileName}]의 v${versionA} vs v${versionB} 비교 실행`);
+            
+            // Add user bubble and clear input field
+            addBubble('user', text);
+            chatHistory.push({ role: 'user', content: text });
+            elements.chatInput.value = '';
+            autoResizeTextarea();
+
+            // Set loading and disable send
+            isLoading = true;
+            setSendEnabled(false);
+
+            // Add system message
+            addBubble('assistant', `요청하신 [${fileName}]의 버전 비교를 시작합니다.`);
+            showTyping();
+
+            try {
+                // 1. Find file in DOM or API
+                let badge = document.querySelector(`span.badge-version[data-item-name*="${fileName}"]`);
+                let itemId = badge?.dataset.itemId;
+                let itemName = badge?.dataset.itemName;
+
+                const hubId = window.explorer?.currentHubId || localStorage.getItem('aps_last_hub_id');
+                const projectId = window.explorer?.currentProjectId || localStorage.getItem('aps_last_project_id');
+
+                if (!itemId && hubId && projectId) {
+                    const folderId = window.explorer?.currentFolderId;
+                    const url = `/api/hubs/${hubId}/projects/${projectId}/contents${folderId ? `?folder_id=${folderId}` : ''}`;
+                    const response = await fetch(url);
+                    if (response.ok) {
+                        const items = await response.json();
+                        const matchedItem = items.find(item => !item.folder && item.name.includes(fileName));
+                        if (matchedItem) {
+                            itemId = matchedItem.id;
+                            itemName = matchedItem.name;
+                        }
+                    }
+                }
+
+                if (!itemId) {
+                    throw new Error(`파일 [${fileName}]을 찾을 수 없습니다.`);
+                }
+
+                // 2. Fetch version URNs
+                const versionsUrl = `/api/hubs/${hubId}/projects/${projectId}/contents/${encodeURIComponent(itemId)}/versions`;
+                const vResponse = await fetch(versionsUrl);
+                if (!vResponse.ok) throw new Error('버전 목록을 가져오지 못했습니다.');
+                const versions = await vResponse.json();
+
+                const versionObjA = versions.find(v => v.vNumber === versionA);
+                const versionObjB = versions.find(v => v.vNumber === versionB);
+
+                if (!versionObjA || !versionObjB) {
+                    throw new Error(`요청하신 버전(v${versionA} 또는 v${versionB})이 존재하지 않습니다.`);
+                }
+
+                const urnA = window.explorer ? window.explorer.decodeUrn(versionObjA.id) : versionObjA.id;
+                const urnB = window.explorer ? window.explorer.decodeUrn(versionObjB.id) : versionObjB.id;
+
+                const nameA = window.formatBimModelName ? window.formatBimModelName(itemName, versionA) : `${itemName}_v${versionA}`;
+                const nameB = window.formatBimModelName ? window.formatBimModelName(itemName, versionB) : `${itemName}_v${versionB}`;
+
+                // 3. Launch compare viewer
+                if (typeof window.compareModels === 'function') {
+                    await window.compareModels(urnA, urnB, nameA, nameB);
+                    hideTyping();
+                    addBubble('assistant', `✅ [${itemName}] 파일의 v${versionA}와 v${versionB} 비교 화면 로드가 완료되었습니다.`);
+                } else {
+                    throw new Error('compareModels 함수를 찾을 수 없습니다.');
+                }
+            } catch (err) {
+                console.error('[Chat-Compare Error]', err);
+                hideTyping();
+                addBubble('error', `⚠️ 비교 실행 중 오류 발생: ${err.message}`, true);
+            } finally {
+                isLoading = false;
+                setSendEnabled(true);
+            }
+            return;
+        }
 
         const now = Date.now();
         if (now - lastCallTime < 1000) {
@@ -283,6 +798,22 @@ const AIPanel = (() => {
             issuesList = window._issueManager.issues;
         } else if (window.ContextHarness?.currentData?.issues) {
             issuesList = window.ContextHarness.currentData.issues;
+        }
+        // 🌟 [Hooking] 현재 프로젝트가 활성화되어 있으면 해당 프로젝트의 이슈만 바인딩
+        var chatCurrentPid = window.activeExplorerProjectId || window.currentProjectId || (new URLSearchParams(window.location.search)).get('projectId');
+        const chatDbPremium = document.getElementById('dashboard-premium-container');
+        const chatDbLegacy = document.getElementById('project-selection-dashboard');
+        const isChatDbActive = (chatDbPremium && chatDbPremium.style.display !== 'none' && chatDbPremium.style.display !== '') || 
+                               (chatDbLegacy && chatDbLegacy.style.display !== 'none' && chatDbLegacy.style.display !== '');
+        if (isChatDbActive) {
+            chatCurrentPid = null;
+        }
+        if (chatCurrentPid) {
+            issuesList = issuesList.filter(function(issue) {
+                var issuePid = issue.projectId || issue.project_id || issue.folderId;
+                if (!issuePid) return false;
+                return String(issuePid) === String(chatCurrentPid);
+            });
         }
         // 🌟 [Hooking] 실제 이슈 매니저의 데이터를 AI 컨텍스트용 전역 변수에 바인딩
         window.currentIssues = issuesList;
@@ -472,17 +1003,95 @@ const AIPanel = (() => {
                 return dynamicContext;
             }
 
+            var today = new Date();
+            var currentDateString = today.getFullYear() + "-" + 
+                                    String(today.getMonth() + 1).padStart(2, '0') + "-" + 
+                                    String(today.getDate()).padStart(2, '0');
+            var dateContext = "현재 시스템 날짜는 " + currentDateString + " 입니다. '오늘', '어제' 등의 기준은 이 날짜를 따르세요. 사용자가 날짜(예: '2026.05.27', '오늘')를 조건으로 물어보면 제공된 이슈 데이터의 'createdDate' 필드를 확인하여 일치하는 이슈만 필터링하여 답변하세요. 날짜 구분자(-, .)는 유연하게 해석하세요.";
+
+            var strictSystemContext = 
+                "당신은 프로젝트 이슈 분석 보조입니다. " +
+                "반드시 아래 제공된 '현재 패널에 보이는 이슈 목록' 데이터 내에서만 답변을 생성하세요. " +
+                "데이터에 없는 내용을 절대 지어내거나 추론하지 마세요. " +
+                "사용자가 날짜를 물어보면 'createdDate' 텍스트와 비교하여 일치하는 항목만 정확히 반환하세요.";
+
+            var panelIssues = [];
+            var issueCards = document.querySelectorAll('#issue-list-container .issue-item, .issue-list-container .issue-item, #diff-issue-list tr[data-id]');
+
+            for (var i = 0; i < issueCards.length; i++) {
+                var card = issueCards[i];
+                var titleEl = card.querySelector('.issue-item-title, .col-title');
+                var dataId = parseInt(card.getAttribute('data-id'));
+                
+                if (titleEl && !isNaN(dataId)) {
+                    var issueObj = null;
+                    if (window._issueManager && window._issueManager.issues) {
+                        issueObj = window._issueManager.issues.find(function(item) {
+                            return item.id === dataId;
+                        });
+                    }
+                    if (!issueObj && window.comparisonIssues) {
+                        issueObj = window.comparisonIssues.find(function(item) {
+                            return item.id === dataId;
+                        });
+                    }
+                    
+                    var rawDate = (issueObj && (issueObj.createdAt || issueObj.created_at || issueObj.date)) || "";
+                    if (!rawDate && dataId > 1000000000000) {
+                        try {
+                            rawDate = new Date(dataId).toISOString();
+                        } catch (e) {}
+                    }
+                    
+                    var formattedDate = "";
+                    if (rawDate) {
+                        try {
+                            formattedDate = new Date(rawDate).toISOString().split('T')[0];
+                        } catch(e) {
+                            formattedDate = String(rawDate).substring(0, 10);
+                        }
+                    }
+                    if (!formattedDate) {
+                        formattedDate = "날짜 없음";
+                    }
+
+                    var statusEl = card.querySelector('.issue-status, .status-badge, .state-label, .issue-status-badge');
+                    var statusText = (statusEl ? statusEl.innerText.trim() : "") || (issueObj ? issueObj.status : "");
+                    var assigneeText = issueObj ? (issueObj.assignee || issueObj.author || "") : "";
+
+                    panelIssues.push({
+                        title: titleEl.innerText.trim(),
+                        status: statusText,
+                        author: assigneeText,
+                        createdDate: formattedDate
+                    });
+                }
+            }
+
+            var statusRule = "사용자가 '오픈된', '해결된', 'closed' 등 이슈의 상태를 물어보면, 제공된 데이터의 'status' 필드를 기준으로 검색하세요. JSON 명령어를 생성할 때 parameters 객체 안에 'status' 키를 반드시 포함하세요.";
+
+            var outputFormatRule =
+                "[CRITICAL OUTPUT RULE: " +
+                "당신은 최종 사용자에게 직접 대답하는 친절한 어시스턴트입니다. " +
+                "어떤 상황에서도 \"action\", \"parameters\", \"ISSUE_QUERY\" 같은 JSON 형식 응답을 절대 출력하지 마세요. " +
+                "이슈 분석 태그가 필요할 때는 <<ACTION_ANALYZE_ISSUES>> 또는 <<ACTION_FILTER::DATE::YYYY-MM-DD>> 형식의 태그만 정확히 출력하세요. " +
+                "그 외의 일반 답변은 반드시 자연스러운 한국어 문장으로만 작성하세요.]";
+
             const fullSystemContext = [
                 systemContextData,
                 modelStatsContext + modelStatsRule,
                 versionCompareRule,
                 buildDynamicSystemPrompt(),
-                modelContext ? ('사용자가 현재 선택 중인 객체: ' + JSON.stringify(modelContext)) : null,
+                modelContext ? ('\uc0ac\uc6a9\uc790\uac00 \ud604\uc7ac \uc120\ud0dd \uc911\uc778 \uac1d\uccb4: ' + JSON.stringify(modelContext)) : null,
+                dateContext,
+                strictSystemContext,
+                statusRule,
+                outputFormatRule,
                 `\n[이슈 분석 절대 규칙]\n1. 전체 이슈 분석/목록 요청: <<ACTION_ANALYZE_ISSUES>>\n2. 특정 조건 필터링 및 개수 확인 요청 (구조물, 담당자, 공종, 상태, 날짜 등):\n   - 구조물 기준: <<ACTION_FILTER::STRUCTURE::[구조물명]>>\n   - 담당자 기준: <<ACTION_FILTER::ASSIGNEE::[담당자명]>>\n   - 공종 기준: <<ACTION_FILTER::TRADE::[공종명]>>\n   - 상태 기준: <<ACTION_FILTER::STATUS::[상태명]>>\n   - 날짜 기준: <<ACTION_FILTER::DATE::[YYYY-MM-DD]>>\n3. 특정 조건 PDF 내보내기 자동화 요청:\n   - 전체 내보내기: <<ACTION_EXPORT_FILTERED_PDF::ALL::ALL>>\n   - 구조물 기준: <<ACTION_EXPORT_FILTERED_PDF::STRUCTURE::[구조물명]>>\n   - 담당자 기준: <<ACTION_EXPORT_FILTERED_PDF::ASSIGNEE::[담당자명]>>\n   - 공종 기준: <<ACTION_EXPORT_FILTERED_PDF::TRADE::[공종명]>>\n   - 상태 기준: <<ACTION_EXPORT_FILTERED_PDF::STATUS::[상태명]>>\n   - 날짜 기준: <<ACTION_EXPORT_FILTERED_PDF::DATE::[YYYY-MM-DD]>>\n어떠한 문장도 생성하지 말고 위 태그만 정확히 출력하라. 이 규칙은 최우선 순위를 갖는다.`
             ].filter(Boolean).join(String.fromCharCode(10));
 
             // 🚨 [Front] 백엔드로 보낼 이슈 데이터 디버깅
-            console.log("🚨 [Front] 백엔드로 보낼 이슈 데이터:", window.currentIssues);
+            console.log("🚨 [Front] 백엔드로 보낼 이슈 데이터:", panelIssues);
 
             const res = await fetch('/api/ai/chat', {
                 method: 'POST',
@@ -490,7 +1099,7 @@ const AIPanel = (() => {
                 body: JSON.stringify({ 
                     messages: chatHistory, 
                     systemContext: fullSystemContext,
-                    issues: window.currentIssues // 🌟 원본 이슈 데이터 배열 전달
+                    issues: panelIssues
                 })
             });
 
@@ -518,23 +1127,26 @@ const AIPanel = (() => {
                         const desc = el.querySelector('.issue-item-desc')?.innerText.trim() || '내용 없음';
                         const status = el.querySelector('.issue-status-badge')?.innerText.trim() || '상태 없음';
                         
-                        // 🌟 [Safety Injection] 날짜 데이터 정규식 강제 추출
+                        const dataId = parseInt(el.dataset.id);
+                        const issueObj = (window._issueManager?.issues || []).find(i => i.id === dataId) ||
+                                         (window.comparisonIssues || []).find(i => i.id === dataId);
+                        const assignee = issueObj?.assignee || '미지정';
+                        const structure = issueObj?.structureName || issueObj?.structure_name || '미지정';
+                        const trade = issueObj?.workType || issueObj?.work_type || '미지정';
+
+                        // 🌟 issueObj.createdAt에서 YYYY-MM-DD 직접 추출
                         let dateString = "날짜 미상";
                         try {
-                            const rawText = el.querySelector('.issue-item-meta, .date')?.innerText || "";
-                            const dateMatch = rawText.match(/(\d{4})[-./](\d{2})[-./](\d{2})/);
-                            if (dateMatch) {
-                                dateString = `${dateMatch[1]}-${dateMatch[2]}-${dateMatch[3]}`;
+                            var rawDateVal = (issueObj && (issueObj.createdAt || issueObj.created_at || issueObj.date)) || "";
+                            if (!rawDateVal && dataId > 1000000000000) {
+                                rawDateVal = new Date(dataId).toISOString();
+                            }
+                            if (rawDateVal) {
+                                dateString = new Date(rawDateVal).toISOString().split('T')[0];
                             }
                         } catch (e) {
                             console.warn("[AI-Panel] 이슈 날짜 추출 실패, 기본값 사용");
                         }
-
-                        const dataId = parseInt(el.dataset.id);
-                        const issueObj = (window._issueManager?.issues || []).find(i => i.id === dataId);
-                        const assignee = issueObj?.assignee || '미지정';
-                        const structure = issueObj?.structureName || issueObj?.structure_name || '미지정';
-                        const trade = issueObj?.workType || issueObj?.work_type || '미지정';
                         
                         if (status.includes('Closed') || status.includes('완료')) closedCount++; else openCount++;
                         issueListStr += `${index + 1}. ${title} (${dateString})\n  * 위치 및 공종: ${structure} / ${trade}\n  * 담당자: ${assignee} (현재 상태: ${status})\n  * 내용: ${desc}\n\n`;
@@ -556,68 +1168,89 @@ const AIPanel = (() => {
                 
                 const typeLabels = { STRUCTURE: '구조물', ASSIGNEE: '담당자', TRADE: '공종', STATUS: '상태', DATE: '날짜' };
                 const label = typeLabels[filterType] || filterType;
-                let finalReport = `[${label}: ${filterValue}] 필터링 결과입니다.\n\n`;
-                
+
+                var matchedIssues = [];
                 const issueElements = document.querySelectorAll('#issue-list-container .issue-item');
-                let filteredCount = 0;
-                let reportDetails = "";
 
                 if (issueElements && issueElements.length > 0) {
-                    issueElements.forEach((el) => {
-                        const dataId = parseInt(el.dataset.id);
-                        const issueObj = (window._issueManager?.issues || []).find(i => i.id === dataId);
+                    issueElements.forEach(function(el) {
+                        var dataId = parseInt(el.dataset.id);
+                        var issueObj = (window._issueManager?.issues || []).find(function(i) { return i.id === dataId; }) ||
+                                       (window.comparisonIssues || []).find(function(i) { return i.id === dataId; });
                         if (!issueObj) return;
 
-                        let isMatch = false;
-                        const statusText = el.querySelector('.issue-status-badge')?.innerText.trim() || '';
-                        
+                        var isMatch = false;
+                        var statusText = el.querySelector('.issue-status-badge')?.innerText.trim() || '';
+
                         if (filterType === 'STRUCTURE') {
-                            const val = issueObj.structureName || issueObj.structure_name || '';
+                            var val = issueObj.structureName || issueObj.structure_name || '';
                             isMatch = val.includes(filterValue);
                         } else if (filterType === 'ASSIGNEE') {
-                            const val = issueObj.assignee || '';
+                            var val = issueObj.assignee || '';
                             isMatch = val.includes(filterValue);
                         } else if (filterType === 'TRADE') {
-                            const val = issueObj.workType || issueObj.work_type || '';
+                            var val = issueObj.workType || issueObj.work_type || '';
                             isMatch = val.includes(filterValue);
                         } else if (filterType === 'STATUS') {
-                            const val = issueObj.status || statusText || '';
+                            var val = issueObj.status || statusText || '';
                             isMatch = val.toLowerCase().includes(filterValue.toLowerCase());
                         } else if (filterType === 'DATE') {
-                            const val = issueObj.createdAt || '';
-                            isMatch = val.includes(filterValue);
+                            var rawDateStr = issueObj.createdAt || issueObj.created_at || issueObj.date || "";
+                            if (!rawDateStr && dataId > 1000000000000) {
+                                try { rawDateStr = new Date(dataId).toISOString(); } catch(e) {}
+                            }
+                            var normalizedIssueDate = "";
+                            try {
+                                if (rawDateStr) normalizedIssueDate = new Date(rawDateStr).toISOString().split('T')[0];
+                            } catch(e) {
+                                normalizedIssueDate = String(rawDateStr).substring(0, 10);
+                            }
+                            var normalizedFilterValue = filterValue.replace(/\./g, '-').trim();
+                            isMatch = normalizedIssueDate === normalizedFilterValue || normalizedIssueDate.startsWith(normalizedFilterValue);
                         }
 
                         if (isMatch) {
-                            filteredCount++;
-                            const title = el.querySelector('.issue-item-title')?.innerText.trim() || '제목 없음';
-                            const desc = el.querySelector('.issue-item-desc')?.innerText.trim() || '내용 없음';
-                            
-                            // 🌟 [Safety Injection] 날짜 데이터 정규식 강제 추출
-                            let dateString = "날짜 미상";
-                            try {
-                                const rawText = el.querySelector('.issue-item-meta, .date')?.innerText || "";
-                                const dateMatch = rawText.match(/(\d{4})[-./](\d{2})[-./](\d{2})/);
-                                if (dateMatch) {
-                                    dateString = `${dateMatch[1]}-${dateMatch[2]}-${dateMatch[3]}`;
-                                }
-                            } catch (e) {}
-
-                            const assignee = issueObj.assignee || '미지정';
-                            const structure = issueObj.structureName || issueObj.structure_name || '미지정';
-                            const trade = issueObj.workType || issueObj.work_type || '미지정';
-                            const status = issueObj.status || statusText || '미지정';
-                            
-                            reportDetails += `${filteredCount}. ${title} (${dateString})\n  * 위치/공종: ${structure} / ${trade}\n  * 담당자: ${assignee} (상태: ${status})\n  * 내용: ${desc}\n\n`;
+                            matchedIssues.push({
+                                title: el.querySelector('.issue-item-title')?.innerText.trim() || '제목 없음',
+                                status: issueObj.status || statusText || '미지정',
+                                structure: issueObj.structureName || issueObj.structure_name || '미지정',
+                                trade: issueObj.workType || issueObj.work_type || '미지정',
+                                assignee: issueObj.assignee || '미지정'
+                            });
                         }
                     });
                 }
 
-                if (filteredCount > 0) {
-                    finalReport += `해당 조건으로 총 ${filteredCount}건의 이슈가 확인되었습니다.\n\n📋 상세 목록:\n${reportDetails}`;
-                    finalReport += `\n💡 제게 "이슈 목록 PDF로 내보내 줘"라고 말씀하시면 현재 필터링된 결과와 관계없이 전체 리포트를 다운로드할 수 있습니다.`;
+                let finalReport;
+                if (matchedIssues.length > 0) {
+                    // 구조물별 집계
+                    var structMap = {};
+                    var tradeMap = {};
+                    var statusMap = {};
+                    matchedIssues.forEach(function(issue) {
+                        structMap[issue.structure] = (structMap[issue.structure] || 0) + 1;
+                        tradeMap[issue.trade] = (tradeMap[issue.trade] || 0) + 1;
+                        statusMap[issue.status] = (statusMap[issue.status] || 0) + 1;
+                    });
+
+                    var structSummary = Object.entries(structMap).sort(function(a, b) { return b[1] - a[1]; })
+                        .map(function(e) { return e[0] + ' ' + e[1] + '건'; }).join(', ');
+                    var tradeSummary = Object.entries(tradeMap).sort(function(a, b) { return b[1] - a[1]; })
+                        .map(function(e) { return e[0] + ' ' + e[1] + '건'; }).join(', ');
+                    var statusSummary = Object.entries(statusMap).sort(function(a, b) { return b[1] - a[1]; })
+                        .map(function(e) { return e[0] + ' ' + e[1] + '건'; }).join(', ');
+
+                    var issueTitles = matchedIssues.map(function(issue, idx) {
+                        return (idx + 1) + '. ' + issue.title + ' (' + issue.status + ')';
+                    }).join('\n');
+
+                    finalReport = '[' + label + ': ' + filterValue + '] 총 ' + matchedIssues.length + '건의 이슈가 있습니다.\n\n' +
+                        '📍 구조물별: ' + structSummary + '\n' +
+                        '🔧 공종별: ' + tradeSummary + '\n' +
+                        '📋 상태별: ' + statusSummary + '\n\n' +
+                        '📌 이슈 목록:\n' + issueTitles;
                 } else {
-                    finalReport += `현재 해당 조건([${label}: ${filterValue}])에 맞는 이슈가 없습니다.`;
+                    finalReport = '[' + label + ': ' + filterValue + '] 해당 조건에 맞는 이슈가 없습니다.';
                 }
 
                 hideTyping(); addBubble('assistant', finalReport); chatHistory.push({ role: 'assistant', content: finalReport });
@@ -933,10 +1566,207 @@ const AIPanel = (() => {
                 return;
             }
 
-            // 일반 답변 (라이브 명령 없음)
-            addBubble('assistant', displayReply || reply);
-            chatHistory.push({ role: 'assistant', content: reply });
+            // 🚨 [여기로 도달한 LLM 응답 최종 방어 로직]
+            var finalReply = displayReply || reply || '';
 
+            // 케이스 1: JSON 형태로 낙아온 경우 → JSON 파싱 후 동적 이슈 필터링 & 자연어 응답 생성
+            if ((finalReply.indexOf('"action"') > -1 || finalReply.indexOf('ISSUE_QUERY') > -1) && !finalReply.includes('<<ACTION_')) {
+                console.warn('[AI-Panel] LLM이 JSON 형태로 응답함 - JSON 파싱 후 동적 필터링 실행');
+                try {
+                    // JSON 블록 추출 (텍스트 중간에 섞여 있을 수 있으므로 정규식으로 추출)
+                    var jsonMatch = finalReply.match(/\{[\s\S]*?"action"[\s\S]*?\}/);
+                    var llmCommand = jsonMatch ? JSON.parse(jsonMatch[0]) : JSON.parse(finalReply);
+
+                    var params = (llmCommand && llmCommand.parameters) ? llmCommand.parameters : llmCommand;
+                    var conditionText = "";
+
+                    // 현재 화면 패널의 이슈 목록 수집 (DOM + 메모리 병합)
+                    var allIssueObjs = [];
+                    var panelCards = document.querySelectorAll('#issue-list-container .issue-item');
+                    panelCards.forEach(function(el) {
+                        var dId = parseInt(el.dataset.id);
+                        var iObj = (window._issueManager && window._issueManager.issues
+                            ? window._issueManager.issues.find(function(i) { return i.id === dId; })
+                            : null) || (window.comparisonIssues
+                            ? window.comparisonIssues.find(function(i) { return i.id === dId; })
+                            : null);
+                        if (iObj) allIssueObjs.push(iObj);
+                    });
+                    // 패널이 비어 있으면 메모리 전체 사용
+                    if (allIssueObjs.length === 0) {
+                        allIssueObjs = (window._issueManager && window._issueManager.issues) || window.issues || [];
+                    }
+
+                    var filtered = allIssueObjs.slice();
+
+                    // 상태(status/state) 필터
+                    if (params.status || params.state || params.Status) {
+                        var targetStatus = String(params.status || params.state || params.Status).toLowerCase().trim();
+                        filtered = filtered.filter(function(issue) {
+                            var currentStatus = issue.status ? String(issue.status).toLowerCase().trim() : "";
+                            return currentStatus.indexOf(targetStatus) > -1 || targetStatus.indexOf(currentStatus) > -1;
+                        });
+                        conditionText += targetStatus + " 상태인 ";
+                    }
+
+                    // 날짜(date/createdDate) 필터
+                    var targetDate = params.date || params.createdDate || params.Date || "";
+                    if (targetDate) {
+                        var normalizedTarget = String(targetDate).replace(/\./g, '-').trim();
+                        filtered = filtered.filter(function(issue) {
+                            var rawD = issue.createdAt || issue.created_at || issue.date || "";
+                            if (!rawD && issue.id && issue.id > 1000000000000) {
+                                try { rawD = new Date(issue.id).toISOString(); } catch(e) {}
+                            }
+                            var nd = "";
+                            try { if (rawD) nd = new Date(rawD).toISOString().split('T')[0]; } catch(e) { nd = String(rawD).substring(0, 10); }
+                            return nd === normalizedTarget || nd.startsWith(normalizedTarget);
+                        });
+                        conditionText += targetDate + "에 작성된 ";
+                    }
+
+                    // 담당자(assignee) 필터
+                    var targetAssignee = params.assignee || params.Assignee || "";
+                    if (targetAssignee) {
+                        filtered = filtered.filter(function(issue) {
+                            return issue.assignee && issue.assignee.indexOf(targetAssignee) > -1;
+                        });
+                        conditionText += targetAssignee + " 담당의 ";
+                    }
+
+                    // 구조물(structure) 필터
+                    var targetStructure = params.structure || params.Structure || params.structureName || "";
+                    if (targetStructure) {
+                        filtered = filtered.filter(function(issue) {
+                            var sv = issue.structureName || issue.structure_name || "";
+                            return sv.indexOf(targetStructure) > -1;
+                        });
+                        conditionText += targetStructure + " 구조물의 ";
+                    }
+
+                    // 공종(trade) 필터
+                    var targetTrade = params.trade || params.Trade || params.workType || "";
+                    if (targetTrade) {
+                        filtered = filtered.filter(function(issue) {
+                            var tv = issue.workType || issue.work_type || "";
+                            return tv.indexOf(targetTrade) > -1;
+                        });
+                        conditionText += targetTrade + " 공종의 ";
+                    }
+
+                    if (!conditionText) conditionText = "전체 ";
+
+                    if (filtered.length > 0) {
+                        // 구조물·공종·상태별 요약 집계
+                        var sm = {}, tm = {}, stm = {};
+                        filtered.forEach(function(issue) {
+                            var s = issue.structureName || issue.structure_name || "미지정";
+                            var t = issue.workType || issue.work_type || "미지정";
+                            var st = issue.status || "미지정";
+                            sm[s] = (sm[s] || 0) + 1;
+                            tm[t] = (tm[t] || 0) + 1;
+                            stm[st] = (stm[st] || 0) + 1;
+                        });
+                        var ss = Object.entries(sm).sort(function(a, b) { return b[1] - a[1]; })
+                            .map(function(e) { return e[0] + " " + e[1] + "건"; }).join(", ");
+                        var ts = Object.entries(tm).sort(function(a, b) { return b[1] - a[1]; })
+                            .map(function(e) { return e[0] + " " + e[1] + "건"; }).join(", ");
+                        var sts = Object.entries(stm).sort(function(a, b) { return b[1] - a[1]; })
+                            .map(function(e) { return e[0] + " " + e[1] + "건"; }).join(", ");
+                        var its = filtered.slice(0, 10).map(function(issue, idx) {
+                            return (idx + 1) + ". " + (issue.title || "제목 없음") + " (" + (issue.status || "미지정") + ")";
+                        }).join("\n");
+                        var moreTxt = filtered.length > 10 ? "\n  … 외 " + (filtered.length - 10) + "건 더 있습니다." : "";
+
+                        finalReply = conditionText + "이슈는 총 " + filtered.length + "건입니다.\n\n" +
+                            "📍 구조물별: " + ss + "\n" +
+                            "🔧 공종별: " + ts + "\n" +
+                            "📋 상태별: " + sts + "\n\n" +
+                            "📌 이슈 목록:\n" + its + moreTxt;
+                    } else {
+                        finalReply = "요청하신 " + conditionText + "조건에 일치하는 이슈를 찾을 수 없습니다.";
+                    }
+                } catch (jsonParseErr) {
+                    console.warn('[AI-Panel] JSON 파싱 실패 - 키워드 기반 재라우팅 시도', jsonParseErr);
+                    var lowerReply = finalReply.toLowerCase();
+                    var isDateQuery = lowerReply.indexOf('date') > -1 || lowerReply.indexOf('날짜') > -1;
+                    var isAnalyzeQuery = lowerReply.indexOf('analyze') > -1 || lowerReply.indexOf('issue_query') > -1;
+                    if (isDateQuery) {
+                        finalReply = '<<ACTION_FILTER::DATE::' + currentDateString + '>>';
+                    } else if (isAnalyzeQuery) {
+                        finalReply = '<<ACTION_ANALYZE_ISSUES>>';
+                    } else {
+                        finalReply = '이슈 데이터를 확인했습니다. 좀 더 구체적인 조건(날짜, 구조물, 공종, 담당자 등)을 말씀해 주시면 정확히 안내해 드릴게요.';
+                    }
+                }
+            }
+
+            // 케이스 2: <<ACTION_...>> 태그가 남아있으면 인라인으로 필터 요약 실행
+            if (finalReply.indexOf('<<ACTION_ANALYZE_ISSUES>>') > -1) {
+                finalReply = '프로젝트 이슈를 분석하고 있습니다. 잠시만 기다려 주세요.';
+            }
+            var filterTagCheck = finalReply.match(/<<ACTION_FILTER::(.*?)::(.*?)>>/i);
+            if (filterTagCheck) {
+                // 인라인 필터 요약 실행 (패널 리다이렉트 없이 챗봇에 직접 출력)
+                var ftType = filterTagCheck[1].toUpperCase();
+                var ftValue = filterTagCheck[2].trim();
+                var ftLabels = { STRUCTURE: '구조물', ASSIGNEE: '담당자', TRADE: '공종', STATUS: '상태', DATE: '날짜' };
+                var ftLabel = ftLabels[ftType] || ftType;
+                var ftMatched = [];
+                var ftElements = document.querySelectorAll('#issue-list-container .issue-item');
+                ftElements.forEach(function(el) {
+                    var dId = parseInt(el.dataset.id);
+                    var iObj = (window._issueManager?.issues || []).find(function(i) { return i.id === dId; }) ||
+                               (window.comparisonIssues || []).find(function(i) { return i.id === dId; });
+                    if (!iObj) return;
+                    var matched = false;
+                    if (ftType === 'DATE') {
+                        var rds = iObj.createdAt || iObj.created_at || iObj.date || "";
+                        if (!rds && dId > 1000000000000) { try { rds = new Date(dId).toISOString(); } catch(e) {} }
+                        var nid = ""; try { if (rds) nid = new Date(rds).toISOString().split('T')[0]; } catch(e) { nid = String(rds).substring(0, 10); }
+                        var nfv = ftValue.replace(/\./g, '-').trim();
+                        matched = nid === nfv || nid.startsWith(nfv);
+                    } else if (ftType === 'STRUCTURE') { matched = (iObj.structureName || iObj.structure_name || '').includes(ftValue); }
+                    else if (ftType === 'ASSIGNEE') { matched = (iObj.assignee || '').includes(ftValue); }
+                    else if (ftType === 'TRADE') { matched = (iObj.workType || iObj.work_type || '').includes(ftValue); }
+                    else if (ftType === 'STATUS') { matched = (iObj.status || '').toLowerCase().includes(ftValue.toLowerCase()); }
+                    if (matched) {
+                        ftMatched.push({
+                            title: el.querySelector('.issue-item-title')?.innerText.trim() || '제목 없음',
+                            status: iObj.status || '미지정',
+                            structure: iObj.structureName || iObj.structure_name || '미지정',
+                            trade: iObj.workType || iObj.work_type || '미지정'
+                        });
+                    }
+                });
+                if (ftMatched.length > 0) {
+                    var sm = {}, tm = {}, stm = {};
+                    ftMatched.forEach(function(issue) {
+                        sm[issue.structure] = (sm[issue.structure] || 0) + 1;
+                        tm[issue.trade] = (tm[issue.trade] || 0) + 1;
+                        stm[issue.status] = (stm[issue.status] || 0) + 1;
+                    });
+                    var ss = Object.entries(sm).sort(function(a, b) { return b[1] - a[1]; }).map(function(e) { return e[0] + ' ' + e[1] + '건'; }).join(', ');
+                    var ts = Object.entries(tm).sort(function(a, b) { return b[1] - a[1]; }).map(function(e) { return e[0] + ' ' + e[1] + '건'; }).join(', ');
+                    var sts = Object.entries(stm).sort(function(a, b) { return b[1] - a[1]; }).map(function(e) { return e[0] + ' ' + e[1] + '건'; }).join(', ');
+                    var its = ftMatched.map(function(issue, idx) { return (idx + 1) + '. ' + issue.title + ' (' + issue.status + ')'; }).join('\n');
+                    finalReply = '[' + ftLabel + ': ' + ftValue + '] 총 ' + ftMatched.length + '건의 이슈가 있습니다.\n\n' +
+                        '📍 구조물별: ' + ss + '\n' +
+                        '🔧 공종별: ' + ts + '\n' +
+                        '📋 상태별: ' + sts + '\n\n' +
+                        '📌 이슈 목록:\n' + its;
+                } else {
+                    finalReply = '[' + ftLabel + ': ' + ftValue + '] 해당 조건에 맞는 이슈가 없습니다.';
+                }
+            }
+
+            // 해소 후 남은 <<>> 태그 제거
+            finalReply = finalReply.replace(/<<ACTION[A-Z_:]+[^>]*>>/gi, '').trim();
+
+            if (finalReply) {
+                addBubble('assistant', finalReply);
+                chatHistory.push({ role: 'assistant', content: finalReply });
+            }
             if (chatHistory.length > 20) chatHistory = chatHistory.slice(-20);
 
         } catch (err) {

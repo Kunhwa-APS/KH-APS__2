@@ -48,14 +48,14 @@
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 
     <!-- Design Tokens & Components -->
-    <link rel="stylesheet" href="/css/design-system.css?v=9" />
+    <link rel="stylesheet" href="/css/design-system.css?v=10" />
 
     <!-- Existing Styles -->
-    <link rel="stylesheet" href="/css/style.css?v=9" />
-    <link rel="stylesheet" href="/css/dashboard-premium.css?v=9" />
+    <link rel="stylesheet" href="/css/style.css?v=10" />
+    <link rel="stylesheet" href="/css/dashboard-premium.css?v=10" />
 
     <!-- UI Refresh Layer (must load last to override) -->
-    <link rel="stylesheet" href="/css/ui-refresh.css?v=9" />
+    <link rel="stylesheet" href="/css/ui-refresh.css?v=10" />
 
     <!-- Three Mesh BVH for Narrow Phase Clash -->
     <script src="https://unpkg.com/three-mesh-bvh@0.7.3/build/index.umd.cjs"></script>
@@ -131,7 +131,7 @@
             // PDF 내보내기 버튼 상태 토글
             const pdfWrap = document.getElementById('comp-pdf-dropdown-wrap');
             if (tabId === 'issues-tab') {
-                if (pdfWrap) pdfWrap.style.setProperty('display', 'block', 'important');
+                if (pdfWrap) pdfWrap.style.setProperty('display', 'flex', 'important');
             } else {
                 if (pdfWrap) pdfWrap.style.setProperty('display', 'none', 'important');
             }
@@ -337,6 +337,61 @@
             });
         };
 
+        window.deleteMultipleIssues = async function(ids) {
+            try {
+                // 순차 삭제 (서버 과부하 방지를 위해 순차적 await 처리)
+                for (var i = 0; i < ids.length; i++) {
+                    await fetch('/api/issues/' + ids[i], {
+                        method: 'DELETE'
+                    });
+                }
+
+                alert(ids.length + "개의 이슈가 성공적으로 삭제되었습니다.");
+
+                // 삭제 완료 후 이슈 목록 새로고침 (기존 렌더링 함수 호출)
+                var projectId = window.currentProjectId || "default_project";
+                if (typeof window.renderComparisonIssues === 'function') {
+                    window.renderComparisonIssues(projectId);
+                } else {
+                    window.location.reload(); // Fallback
+                }
+                
+                // 마스터 체크박스 해제
+                var masterCb = document.getElementById('check-all-comp-issues');
+                if (masterCb) masterCb.checked = false;
+            } catch (error) {
+                console.error("이슈 삭제 중 오류 발생:", error);
+                alert("일부 이슈 삭제에 실패했습니다. 콘솔을 확인해 주세요.");
+            }
+        };
+
+        // DOMContentLoaded 내에서 이벤트 바인딩
+        document.addEventListener('DOMContentLoaded', function() {
+            var deleteBtn = document.getElementById('btn-delete-selected-comp-issues');
+            if (deleteBtn) {
+                deleteBtn.addEventListener('click', async function() {
+                    var checkedBoxes = document.querySelectorAll('.comp-issue-check:checked');
+
+                    if (checkedBoxes.length === 0) {
+                        alert("삭제할 이슈를 먼저 선택해 주세요.");
+                        return;
+                    }
+
+                    if (!confirm("선택한 " + checkedBoxes.length + "개의 이슈를 정말 삭제하시겠습니까?")) {
+                        return;
+                    }
+
+                    var idsToDelete = [];
+                    checkedBoxes.forEach(function(box) {
+                        var issueId = box.getAttribute('data-id') || box.value;
+                        if (issueId) idsToDelete.push(issueId);
+                    });
+
+                    await window.deleteMultipleIssues(idsToDelete);
+                });
+            }
+        });
+
         window.toggleCompPdfDropdown = function(e) {
             // 1. 이벤트 버블링 및 기본 동작 완벽 차단 (다른 클릭 이벤트와 충돌 방지)
             if (e) {
@@ -482,28 +537,35 @@
             });
         };
 
-        window.exportComparisonIssuesPdf = async function(exportAll) {
-            console.log("Exporting comparison issues PDF...", exportAll ? "all" : "selected");
+        window.exportComparisonIssuesPdf = async function(issuesToExport) {
+            var isFilterMode = Array.isArray(issuesToExport);
+            console.log("Exporting comparison issues PDF...", isFilterMode ? "filtered list" : (issuesToExport ? "all" : "selected"));
             
             const checkedBoxes = document.querySelectorAll('.comp-issue-check:checked');
             const checkedIds = [...checkedBoxes].map(cb => parseInt(cb.dataset.id));
             
             try {
-                const resp = await fetch('/api/issues');
-                if (!resp.ok) throw new Error("Failed to fetch issues");
-                const issues = await resp.json();
+                // 만약 외부에서 넘겨준 필터링된 배열이 있으면 그걸 쓰고, 없으면 기존처럼 전체 배열 사용
+                var targetList = isFilterMode ? issuesToExport : null;
                 
-                let targetIssues = issues.filter(i => i.isComparison === true);
-                if (!exportAll) {
-                    targetIssues = targetIssues.filter(i => checkedIds.includes(i.id));
+                if (!targetList) {
+                    const resp = await fetch('/api/issues');
+                    if (!resp.ok) throw new Error("Failed to fetch issues");
+                    const issues = await resp.json();
+                    
+                    targetList = issues.filter(i => i.isComparison === true);
+                    if (issuesToExport === false) { // selected only
+                        targetList = targetList.filter(i => checkedIds.includes(i.id));
+                    }
                 }
                 
-                if (targetIssues.length === 0) {
-                    alert("내보낼 이슈가 없습니다. 항목을 선택하거나 이슈를 추가해 주세요.");
+                if (targetList.length === 0) {
+                    alert("내보낼 이슈 데이터가 없습니다.");
                     return;
                 }
                 
-                const processedIssues = targetIssues.map((issue) => {
+                const processedIssues = targetList.map((issue) => {
+                    if (!issue) return null;
                     console.log("🚀 PDF 렌더링을 위한 이슈 데이터 검증:", issue);
                     
                     const updated = { ...issue };
@@ -530,30 +592,51 @@
                         afterTag = "<img src='" + issue.afterImage + "' style='width: 100%; height: 280px; object-fit: cover; object-position: center;'>";
                     }
 
-                    var imageTableRows = "" +
-                    "<tr>" +
-                        "<td colspan='6' style='padding: 0 !important; border: none !important;'>" +
-                            "<table style='width: 100% !important; border-collapse: collapse !important; table-layout: fixed !important; margin: 0 !important; padding: 0 !important; border: none !important;'>" +
-                                "<tr style='background-color: #eaecf0;'>" +
-                                    "<td width='50%' style='width: 50% !important; min-width: 50% !important; max-width: 50% !important; text-align: center; font-weight: bold; padding: 10px; border: 1px solid #777;'>변경 전 (" + verA + ")</td>" +
-                                    "<td width='50%' style='width: 50% !important; min-width: 50% !important; max-width: 50% !important; text-align: center; font-weight: bold; padding: 10px; border: 1px solid #777;'>변경 후 (" + verB + ")</td>" +
-                                "</tr>" +
-                                "<tr>" +
-                                    "<td width='50%' style='width: 50% !important; min-width: 50% !important; max-width: 50% !important; text-align: center; vertical-align: middle; padding: 10px; border: 1px solid #777; height: 400px;'>" + beforeTag + "</td>" +
-                                    "<td width='50%' style='width: 50% !important; min-width: 50% !important; max-width: 50% !important; text-align: center; vertical-align: middle; padding: 10px; border: 1px solid #777; height: 400px;'>" + afterTag + "</td>" +
-                                "</tr>" +
-                            "</table>" +
-                        "</td>" +
-                    "</tr>";
+                    var imageTableRows = "";
+                    if (issue.isComparison) {
+                        imageTableRows = "" +
+                        "<tr>" +
+                            "<td colspan='6' style='padding: 0 !important; border: none !important;'>" +
+                                "<table style='width: 100% !important; border-collapse: collapse !important; table-layout: fixed !important; margin: 0 !important; padding: 0 !important; border: none !important;'>" +
+                                    "<tr style='background-color: #eaecf0;'>" +
+                                        "<td width='50%' style='width: 50% !important; min-width: 50% !important; max-width: 50% !important; text-align: center; font-weight: bold; padding: 10px; border: 1px solid #777;'>변경 전 (" + verA + ")</td>" +
+                                        "<td width='50%' style='width: 50% !important; min-width: 50% !important; max-width: 50% !important; text-align: center; font-weight: bold; padding: 10px; border: 1px solid #777;'>변경 후 (" + verB + ")</td>" +
+                                    "</tr>" +
+                                    "<tr>" +
+                                        "<td width='50%' style='width: 50% !important; min-width: 50% !important; max-width: 50% !important; text-align: center; vertical-align: middle; padding: 10px; border: 1px solid #777; height: 400px;'>" + beforeTag + "</td>" +
+                                        "<td width='50%' style='width: 50% !important; min-width: 50% !important; max-width: 50% !important; text-align: center; vertical-align: middle; padding: 10px; border: 1px solid #777; height: 400px;'>" + afterTag + "</td>" +
+                                    "</tr>" +
+                                "</table>" +
+                            "</td>" +
+                        "</tr>";
+                    } else {
+                        var thumbTag = "<span style='color:#999;'>이미지 없음</span>";
+                        if (issue.thumbnail) {
+                            thumbTag = "<img src='" + issue.thumbnail + "' style='width: 100%; height: 280px; object-fit: cover; object-position: center;'>";
+                        }
+                        imageTableRows = "" +
+                        "<tr>" +
+                            "<td colspan='6' style='padding: 0 !important; border: none !important;'>" +
+                                "<table style='width: 100% !important; border-collapse: collapse !important; table-layout: fixed !important; margin: 0 !important; padding: 0 !important; border: none !important;'>" +
+                                    "<tr style='background-color: #eaecf0;'>" +
+                                        "<td style='text-align: center; font-weight: bold; padding: 10px; border: 1px solid #777;'>현장 스냅샷</td>" +
+                                    "</tr>" +
+                                    "<tr>" +
+                                        "<td style='text-align: center; vertical-align: middle; padding: 10px; border: 1px solid #777; height: 400px;'>" + thumbTag + "</td>" +
+                                    "</tr>" +
+                                "</table>" +
+                            "</td>" +
+                        "</tr>";
+                    }
                     
-                    updated.thumbnail = beforeImg;
+                    updated.thumbnail = beforeImg || issue.thumbnail || '';
                     updated.afterThumbnail = afterImg;
                     updated.beforeImage = beforeImg;
                     updated.afterImage = afterImg;
                     updated.imageTableRows = imageTableRows;
                     
                     return updated;
-                });
+                }).filter(Boolean);
                 
                 const payload = {
                     title: '버전 비교 이슈 보고서',
@@ -1086,7 +1169,7 @@
                     </div>
 
                     <!-- PDF 내보내기 드롭다운 (기존 btn-export 양식 재사용, 완전히 숨김 또는 예비용) -->
-                    <div class="pdf-dropdown-wrap" id="comp-pdf-dropdown-wrap" style="display: none; margin-bottom: 5px; margin-right: 15px;">
+                    <div class="pdf-dropdown-wrap" id="comp-pdf-dropdown-wrap" style="display: none; margin-bottom: 5px; margin-right: 15px; flex-direction: row; align-items: center; gap: 8px;">
                         <button class="btn-export btn-pdf-icon" id="btn-comp-export-pdf"
                             onclick="window.toggleCompPdfDropdown(event)"
                             title="선택 이슈 PDF 내보내기">
@@ -1103,6 +1186,9 @@
                             <li id="comp-pdf-export-selected" onclick="window.exportComparisonIssuesPdf(false)"><strong>✅ 선택 항목 내보내기</strong></li>
                             <li id="comp-pdf-export-all" onclick="window.exportComparisonIssuesPdf(true)"><strong>📋 전체 내보내기</strong></li>
                         </ul>
+                        <button id="btn-delete-selected-comp-issues" style="display: inline-flex; align-items: center; justify-content: center; gap: 4px; margin-left: 8px; background-color: #3b82f6 !important; color: #ffffff !important; border: 1px solid #2563eb !important; border-radius: 4px; padding: 0 12px; height: 29px !important; box-sizing: border-box; cursor: pointer; font-size: 0.875rem;" title="선택한 이슈 일괄 삭제">
+                            <i class="fas fa-trash"></i> 선택 삭제
+                        </button>
                     </div>
                 </div>
 
@@ -1316,8 +1402,8 @@
             <div class="modal-header">
                 <h3>Create Issue</h3><button class="close-modal" id="close-issue-modal">✕</button>
             </div>
-            <div class="modal-image-preview" id="modal-image-preview" style="display:none;"><img id="issue-preview-img"
-                    src="" /></div>
+            <div class="modal-image-preview" id="modal-image-preview" style="display:none; width:250px !important; height:180px !important; margin:10px auto !important; border:1px solid #e2e8f0 !important; background:#f8fafc !important; border-radius:4px !important; overflow:hidden !important; justify-content:center !important; align-items:center !important;"><img id="issue-preview-img"
+                    src="" style="width:100% !important; height:100% !important; object-fit:contain !important; display:block !important;" /></div>
             <div class="modal-body">
                 <div class="form-group"><label>Issue Number</label>
                     <div id="issue-number-display"
@@ -1345,8 +1431,8 @@
                             style="background:#10b981;color:#fff;border:none;padding:6px 12px;border-radius:4px;cursor:pointer;font-weight:bold;"><i
                                 class="fas fa-camera"></i> 현재 시점 캡처하여 저장</button>
                     </div>
-                    <div class="modal-image-preview" id="modal-after-image-preview" style="display:none;"><img
-                            id="issue-after-preview-img" src="" /></div>
+                    <div class="modal-image-preview" id="modal-after-image-preview" style="display:none; width:250px !important; height:180px !important; margin:10px auto !important; border:1px solid #e2e8f0 !important; background:#f8fafc !important; border-radius:4px !important; overflow:hidden !important; justify-content:center !important; align-items:center !important;"><img
+                            id="issue-after-preview-img" src="" style="width:100% !important; height:100% !important; object-fit:contain !important; display:block !important;" /></div>
                 </div>
             </div>
             <div class="modal-footer"><button class="btn-cancel" id="cancel-issue-btn">Cancel</button><button

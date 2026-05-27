@@ -24,8 +24,8 @@ app.disable('x-powered-by');
 // ── 전역 미들웨어 ──────────────────────────────────────────────
 app.use(securityHeaders);
 app.use(requestLogger);
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // 정적 자산 (캐시 정책 포함)
 app.use(express.static(path.join(__dirname, 'public'), {
